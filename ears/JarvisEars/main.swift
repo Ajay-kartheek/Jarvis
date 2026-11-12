@@ -265,6 +265,13 @@ final class SystemAudioTap {
   private var resampler: Resampler?
   private let meter: LevelMeter
   private var outputListener: AudioObjectPropertyListenerBlock?
+  // Setting up and tearing down happens on its own queue. Stopping the capture
+  // device waits for the audio callback to finish, so doing it from the
+  // callback's queue would wait for itself.
+  private let control = DispatchQueue(label: "jarvis.ears.system.control")
+  private var pendingRebuild: DispatchWorkItem?
+  private var watchdog: DispatchSourceTimer?
+  private var lastAudio = DispatchTime.now().uptimeNanoseconds
 
   init(link: Link) {
     self.link = link
@@ -272,8 +279,23 @@ final class SystemAudioTap {
   }
 
   func start() throws {
-    try buildWithFallback()
+    try control.sync { try buildWithFallback() }
     watchDefaultOutputDevice()
+    startWatchdog()
+  }
+
+  /// A running tap delivers buffers continuously, silence included. If they
+  /// stop arriving, set the capture up again.
+  private func startWatchdog() {
+    let timer = DispatchSource.makeTimerSource(queue: control)
+    timer.schedule(deadline: .now() + 5, repeating: 3)
+    timer.setEventHandler { [weak self] in
+      guard let self, self.aggregateID != kAudioObjectUnknown else { return }
+      let idle = DispatchTime.now().uptimeNanoseconds &- self.lastAudio
+      if idle > 4_000_000_000 { self.rebuild(reason: "capture stalled") }
+    }
+    timer.resume()
+    watchdog = timer
   }
 
   /// A capture device that holds only the tap is the simplest arrangement. If
@@ -396,6 +418,7 @@ final class SystemAudioTap {
     // The tap's stream is the last buffer: when the capture device is paired
     // with an output device that also has inputs, those come first.
     let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+    lastAudio = DispatchTime.now().uptimeNanoseconds
     guard let format, let resampler, let last = buffers.last, last.mData != nil,
       last.mDataByteSize > 0
     else { return }
@@ -435,16 +458,26 @@ final class SystemAudioTap {
   private func watchDefaultOutputDevice() {
     var address = globalAddress(kAudioHardwarePropertyDefaultOutputDevice)
     let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-      self?.rebuild(reason: "output device changed")
+      self?.scheduleRebuild(reason: "output device changed")
     }
     outputListener = listener
     AudioObjectAddPropertyListenerBlock(
-      AudioObjectID(kAudioObjectSystemObject), &address, queue, listener)
+      AudioObjectID(kAudioObjectSystemObject), &address, control, listener)
   }
 
+  /// Device changes arrive in bursts; wait for them to settle, then rebuild once.
+  private func scheduleRebuild(reason: String) {
+    pendingRebuild?.cancel()
+    let work = DispatchWorkItem { [weak self] in self?.rebuild(reason: reason) }
+    pendingRebuild = work
+    control.asyncAfter(deadline: .now() + 0.6, execute: work)
+  }
+
+  /// Runs on the control queue.
   private func rebuild(reason: String) {
     link.status("system_restarting", ["reason": reason])
     teardown()
+    lastAudio = DispatchTime.now().uptimeNanoseconds
     do {
       try buildWithFallback()
     } catch {
@@ -453,7 +486,8 @@ final class SystemAudioTap {
   }
 
   func stop() {
-    queue.sync { teardown() }
+    watchdog?.cancel()
+    control.sync { teardown() }
   }
 }
 
@@ -478,13 +512,17 @@ final class MicCapture {
     observer = NotificationCenter.default.addObserver(
       forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
     ) { [weak self] _ in
-      guard let self else { return }
-      self.link.status("mic_restarting", ["reason": "input device changed"])
-      self.engine.inputNode.removeTap(onBus: 0)
-      do {
-        try self.install()
-      } catch {
-        self.link.status("mic_failed", ["error": "\(error)"])
+      // Give the new device a moment to settle, and do the work off the
+      // thread that delivered the notification.
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+        guard let self else { return }
+        self.link.status("mic_restarting", ["reason": "input device changed"])
+        self.engine.inputNode.removeTap(onBus: 0)
+        do {
+          try self.install()
+        } catch {
+          self.link.status("mic_failed", ["error": "\(error)"])
+        }
       }
     }
   }

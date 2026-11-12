@@ -41,6 +41,7 @@ EXCERPT_CHARS = 500
 TRANSCRIPT_TAIL = 10
 TURNS_BEFORE_RESET = 50
 NOTHING = "NONE"
+START_TIMEOUT_SECONDS = 45
 
 INSTRUCTIONS = """You are Jarvis, helping the user live during a meeting. You are shown the transcript as it happens: "Them" is the other side, "You" is the user.
 
@@ -372,8 +373,14 @@ async def run(config: Config, *, project_name: str | None = None, seconds: float
         def post(kind: str, first, second) -> None:
             loop.call_soon_threadsafe(inbox.put_nowait, (kind, first, second))
 
+        def listen_safely(arguments) -> None:
+            try:
+                listen.run(arguments)
+            except Exception as exc:  # report it instead of dying silently in the thread
+                post("failed", f"The listener stopped: {type(exc).__name__}: {exc}", None)
+
         listener = threading.Thread(
-            target=listen.run,
+            target=listen_safely,
             args=(SimpleNamespace(
                 seconds=seconds, wav=None, say=say, say_after=10.0, partials=False, out=None,
                 echo_guard=not headphones, quiet=True, stop=stop,
@@ -384,7 +391,12 @@ async def run(config: Config, *, project_name: str | None = None, seconds: float
             daemon=True,
         )
         listener.start()
-        await advisor.start()
+        try:
+            await asyncio.wait_for(advisor.start(), timeout=START_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"Claude did not answer within {START_TIMEOUT_SECONDS} seconds. Check the internet connection."
+            ) from None
         emit({"type": "ready"})
 
         tail: deque = deque(maxlen=TRANSCRIPT_TAIL)
@@ -425,6 +437,8 @@ async def run(config: Config, *, project_name: str | None = None, seconds: float
                     _record(out, first, second)
                     if first == "Them" and needs_a_look(second):
                         waiting = (second, False)
+                elif kind == "failed":
+                    raise RuntimeError(first)
                 elif kind == "command" and first == "suggest":
                     remarks = [text for speaker, text in tail if speaker == "Them"] or [text for _, text in tail]
                     if remarks:

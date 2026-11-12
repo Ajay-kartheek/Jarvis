@@ -45,6 +45,21 @@ MAX_WINDOW_SECONDS = 15.0  # cut an unbroken stretch of speech at this length
 MIN_WINDOW_SECONDS = 0.3
 
 
+def load_model():
+    """The speech model, from the copy already on this Mac when there is one.
+
+    Looking it up by name asks the model hub first, which fails without a
+    network connection even though the files are here.
+    """
+    from huggingface_hub import snapshot_download
+
+    try:
+        folder = snapshot_download(MODEL, local_files_only=True)
+    except Exception:
+        folder = snapshot_download(MODEL)  # first use: download it
+    return from_pretrained(folder)
+
+
 class HelperAudio:
     """Starts JarvisEars and collects the audio it sends, per source."""
 
@@ -53,6 +68,8 @@ class HelperAudio:
             name: collections.deque() for name in SOURCES.values()
         }
         self.alive = True
+        self.last_packet = time.monotonic()
+        self.waiting_for_permission = False
         server = socket.create_server(("127.0.0.1", 0))
         port = server.getsockname()[1]
         subprocess.run(["open", "-n", str(APP), "--args", "--port", str(port)], check=True)
@@ -82,13 +99,27 @@ class HelperAudio:
                     break
                 if kind == STATUS:
                     event = json.loads(payload)
+                    name = event.get("event", "")
+                    if name == "system_permission_prompt":
+                        self.waiting_for_permission = True
+                    elif name.startswith(("system_", "mic_")) and name != "system_restarting":
+                        self.waiting_for_permission = False
+                        self.last_packet = time.monotonic()
                     if event.get("event") != "level":
                         print("status:", json.dumps(event), file=sys.stderr, flush=True)
                 elif kind in SOURCES:
+                    self.last_packet = time.monotonic()
                     self.pending[SOURCES[kind]].append(np.frombuffer(payload, dtype="<f4"))
         except OSError:
             pass
         self.alive = False
+
+    @property
+    def stalled(self) -> bool:
+        """True when the helper has sent no audio for a while (it normally sends silence too)."""
+        if self.waiting_for_permission:  # macOS is showing its prompt; that can take a while
+            return False
+        return time.monotonic() - self.last_packet > 10
 
     def poll(self, source: str) -> list[np.ndarray]:
         queue = self.pending[source]
@@ -287,7 +318,7 @@ def run(args) -> int:
     stop = getattr(args, "stop", None)
     quiet = getattr(args, "quiet", False)
     started_loading = time.perf_counter()
-    model = from_pretrained(MODEL)
+    model = load_model()
     model.generate(get_logmel(mx.zeros(SAMPLE_RATE), model.preprocessor_config))  # warm up
     load_seconds = time.perf_counter() - started_loading
 
@@ -322,6 +353,8 @@ def run(args) -> int:
         ):
             if not args.wav:
                 time.sleep(poll_seconds)
+                if audio.stalled:
+                    raise RuntimeError("The audio helper stopped sending audio.")
                 if args.say and not spoken and time.monotonic() - started >= args.say_after:
                     subprocess.Popen(["say", args.say])
                     spoken = True
