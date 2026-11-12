@@ -8,11 +8,13 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 
-from jarvis import google_auth, paths
+from jarvis import google_auth, paths, projects
 from jarvis.config import Config
 from jarvis.store import Store, open_store
 
 SOURCES = ("gmail", "calendar", "drive")
+# Project folders on this Mac are synced once, not per account.
+FOLDERS = "folders"
 
 Progress = Callable[[str], None]
 
@@ -48,13 +50,13 @@ def run_sync(
     store: Store | None = None,
 ) -> list[dict]:
     """Sync every configured account (or one) and return a result per source."""
-    if only is not None and only not in SOURCES:
-        raise ValueError(f"--only must be one of {', '.join(SOURCES)}")
+    if only is not None and only not in (*SOURCES, FOLDERS):
+        raise ValueError(f"--only must be one of {', '.join((*SOURCES, FOLDERS))}")
     results: list[dict] = []
     own_store = store is None
     store = store or open_store()
     try:
-        for entry in config.accounts:
+        for entry in config.accounts if only != FOLDERS else ():
             email = google_auth.normalise_email(entry.email)
             if account and google_auth.normalise_email(account) != email:
                 continue
@@ -72,7 +74,10 @@ def run_sync(
                 if only and source != only:
                     continue
                 results.append(_run_source(store, config, email, source, creds, progress, max_messages))
-        store.tag_projects([project.name for project in config.projects])
+        known_projects = projects.load(store, config)
+        if only in (None, FOLDERS):
+            results.append(_run_folders(store, known_projects, progress))
+        store.tag_projects([project.name for project in known_projects])
     finally:
         if own_store:
             store.close()
@@ -101,6 +106,23 @@ def _run_source(store: Store, config: Config, email: str, source: str, creds,
         summary["seconds"] = round(time.monotonic() - started, 1)
         store.finish_run(run_id, "ok", summary)
         return {**result, "status": "ok", "summary": summary}
+
+
+def _run_folders(store: Store, known_projects: list, progress: Progress) -> dict:
+    from jarvis import folder_sync
+
+    result = {"account": "this Mac", "source": FOLDERS}
+    with source_lock("local", FOLDERS) as acquired:
+        if not acquired:
+            progress("folders: another sync is already running, skipped")
+            return {**result, "status": "busy"}
+        try:
+            summary = folder_sync.sync(store, known_projects, progress=progress)
+        except Exception as exc:
+            detail = google_auth.describe_error(exc)
+            progress(f"folders: failed: {detail}")
+            return {**result, "status": "error", "error": detail}
+    return {**result, "status": "ok", "summary": summary}
 
 
 def _dispatch(store: Store, config: Config, email: str, source: str, creds,

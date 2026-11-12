@@ -21,6 +21,8 @@ from jarvis import paths
 
 SCHEMA_VERSION = 1
 KINDS = ("mail", "event", "file")
+# Files indexed from folders on this Mac are stored under this pseudo-account.
+LOCAL_ACCOUNT = "local"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -132,6 +134,21 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     error       TEXT
 );
 CREATE INDEX IF NOT EXISTS sync_runs_latest ON sync_runs(account, source, started_at);
+
+CREATE TABLE IF NOT EXISTS projects (
+    name       TEXT PRIMARY KEY,
+    people     TEXT NOT NULL DEFAULT '[]',   -- JSON list of names
+    folders    TEXT NOT NULL DEFAULT '[]',   -- JSON list of folders on this Mac
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS local_files (
+    project TEXT NOT NULL,
+    path    TEXT NOT NULL,                   -- absolute path
+    mtime   REAL NOT NULL,
+    size    INTEGER NOT NULL,
+    PRIMARY KEY (project, path)
+);
 
 CREATE TABLE IF NOT EXISTS docs (
     doc_id    INTEGER PRIMARY KEY,
@@ -730,20 +747,73 @@ class Store:
             pattern = re.compile(rf"(?<!\w){re.escape(name)}(?!\w)")
             for row in self.db.execute(
                 "SELECT d.doc_id, d.title, d.body FROM docs_fts JOIN docs d ON d.doc_id = docs_fts.rowid "
-                "WHERE docs_fts MATCH ?",
+                "WHERE docs_fts MATCH ? AND d.account != 'local'",
                 (match,),
             ):
                 # FTS is case-insensitive; project names are matched case-sensitively.
                 if pattern.search(row["title"]) or pattern.search(row["body"]):
                     matches.setdefault(row["doc_id"], set()).add(name)
         with self._tx():
-            self.db.execute("UPDATE docs SET project=NULL WHERE project IS NOT NULL")
+            self.db.execute(
+                "UPDATE docs SET project=NULL WHERE project IS NOT NULL AND account != 'local'"
+            )
             for doc_id, names in matches.items():
                 if len(names) == 1:
                     name = next(iter(names))
                     self.db.execute("UPDATE docs SET project=? WHERE doc_id=?", (name, doc_id))
                     counts[name] = counts.get(name, 0) + 1
         return counts
+
+    # --- projects and their folders ------------------------------------------
+
+    def project_rows(self) -> list[dict]:
+        return [
+            {"name": row["name"], "people": json.loads(row["people"]), "folders": json.loads(row["folders"])}
+            for row in self.db.execute("SELECT name, people, folders FROM projects ORDER BY created_at, name")
+        ]
+
+    def project_save(self, name: str, people: list[str], folders: list[str]) -> None:
+        with self._tx():
+            self.db.execute(
+                "INSERT INTO projects(name, people, folders, created_at) VALUES (?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET people=excluded.people, folders=excluded.folders",
+                (name, json.dumps(people), json.dumps(folders), int(time.time())),
+            )
+
+    def project_delete(self, name: str) -> bool:
+        with self._tx():
+            self.local_delete(name, list(self.local_known(name)))
+            return self.db.execute("DELETE FROM projects WHERE name=?", (name,)).rowcount > 0
+
+    def local_known(self, project: str) -> dict[str, tuple[float, int]]:
+        """Indexed files of a project: path -> (mtime, size)."""
+        return {
+            row["path"]: (row["mtime"], row["size"])
+            for row in self.db.execute("SELECT path, mtime, size FROM local_files WHERE project=?", (project,))
+        }
+
+    def local_upsert(self, project: str, path: str, title: str, body: str, mtime: float, size: int) -> None:
+        source_id = f"{project}:{path}"
+        with self._tx():
+            self.db.execute(
+                "INSERT INTO local_files(project, path, mtime, size) VALUES (?,?,?,?) "
+                "ON CONFLICT(project, path) DO UPDATE SET mtime=excluded.mtime, size=excluded.size",
+                (project, path, mtime, size),
+            )
+            self._upsert_doc(LOCAL_ACCOUNT, "file", source_id, title, body, "", int(mtime), f"file://{path}")
+            self.db.execute(
+                "UPDATE docs SET project=? WHERE account=? AND kind='file' AND source_id=?",
+                (project, LOCAL_ACCOUNT, source_id),
+            )
+
+    def local_delete(self, project: str, paths: list[str]) -> int:
+        removed = 0
+        for path in paths:
+            removed += self.db.execute(
+                "DELETE FROM local_files WHERE project=? AND path=?", (project, path)
+            ).rowcount
+            self._delete_doc(LOCAL_ACCOUNT, "file", f"{project}:{path}")
+        return removed
 
     # --- status ------------------------------------------------------------
 
@@ -755,7 +825,12 @@ class Store:
             {row[0] for row in self.db.execute("SELECT DISTINCT account FROM sync_state")}
             | {row[0] for row in self.db.execute("SELECT DISTINCT account FROM docs")}
         )
+        accounts = [account for account in accounts if account != LOCAL_ACCOUNT]
         result: dict = {"path": str(self.path), "size_bytes": self.path.stat().st_size, "accounts": {}}
+        result["folders"] = {
+            row[0]: row[1]
+            for row in self.db.execute("SELECT project, COUNT(*) FROM local_files GROUP BY project")
+        }
         for account in accounts:
             mail = one(
                 "SELECT COUNT(*) n, MIN(internal_date) lo, MAX(internal_date) hi, COUNT(DISTINCT thread_id) threads "

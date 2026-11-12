@@ -18,6 +18,8 @@ app = typer.Typer(
 )
 auth_app = typer.Typer(no_args_is_help=True, help="Google sign-in.")
 app.add_typer(auth_app, name="auth")
+project_app = typer.Typer(no_args_is_help=True, help="The engagements Jarvis works on, and their folders.")
+app.add_typer(project_app, name="project")
 
 
 def _config() -> Config:
@@ -55,7 +57,7 @@ def _stamped(message: str) -> None:
 @app.command("sync")
 def sync_command(
     only: Annotated[
-        str | None, typer.Option("--only", help="Sync one source: gmail, calendar or drive.")
+        str | None, typer.Option("--only", help="Sync one source: gmail, calendar, drive or folders.")
     ] = None,
     account: Annotated[
         str | None, typer.Option("--account", help="Sync one account (default: all).")
@@ -65,7 +67,7 @@ def sync_command(
         typer.Option("--max-messages", help="Stop the Gmail backfill after this many (for testing)."),
     ] = None,
 ) -> None:
-    """Copy new mail, calendar events and Drive files into the local store."""
+    """Copy new mail, calendar events, Drive files and project folders into the local store."""
     from jarvis import sync as sync_module
 
     config = _config()
@@ -184,9 +186,12 @@ def status() -> None:
     with open_store() as store:
         stats = store.stats()
     typer.echo(f"Store: {stats['path']} ({stats['size_bytes'] / 1_000_000:.1f} MB)")
-    if not stats["accounts"]:
+    if not stats["accounts"] and not stats["folders"]:
         typer.echo("Nothing synced yet. Run: jarvis sync")
         return
+    if stats["folders"]:
+        indexed = ", ".join(f"{name} {count}" for name, count in sorted(stats["folders"].items()))
+        typer.echo(f"Project folders: {indexed} files indexed")
     for account, info in stats["accounts"].items():
         mail, events, files = info["mail"], info["events"], info["files"]
         typer.echo(account)
@@ -321,6 +326,91 @@ def listen(
         )
     )
     raise typer.Exit(code)
+
+
+def _show_project(project) -> None:
+    typer.secho(project.name, bold=True)
+    typer.echo(f"  people:  {', '.join(project.people) or '-'}")
+    if not project.folders:
+        typer.echo("  folders: -")
+    for folder in project.folders:
+        typer.echo(f"  folder:  {folder}")
+
+
+@project_app.command("add")
+def project_add(
+    name: Annotated[str, typer.Argument(help="Project name, for example Atlas.")],
+    folder: Annotated[
+        list[Path] | None, typer.Option("--folder", "-f", help="A folder on this Mac. Repeat for several.")
+    ] = None,
+    person: Annotated[
+        list[str] | None, typer.Option("--person", "-p", help="Someone on the project. Repeat for several.")
+    ] = None,
+    index: Annotated[bool, typer.Option(help="Read the folders straight away.")] = True,
+) -> None:
+    """Add a project, or add folders and people to one that exists."""
+    from jarvis import folder_sync, projects
+    from jarvis.store import open_store
+
+    config = _config()
+    with open_store() as store:
+        try:
+            project = projects.add(
+                store, name, folders=[str(f) for f in folder or []], people=person or [], config=config
+            )
+        except projects.ProjectError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(2) from None
+        _show_project(project)
+        if index and project.folders:
+            summary = folder_sync.sync_project(store, project, progress=typer.echo)
+            typer.echo(
+                f"Read {summary['indexed']} files ({summary['unchanged']} unchanged, "
+                f"{summary['skipped']} skipped, {summary['removed']} removed)."
+            )
+
+
+@project_app.command("list")
+def project_list() -> None:
+    """Show every project with its people and folders."""
+    from jarvis import projects
+    from jarvis.store import open_store
+
+    with open_store() as store:
+        found = projects.load(store, _config())
+    if not found:
+        typer.echo("No projects yet. Add one: jarvis project add <name> --folder <path>")
+    for project in found:
+        _show_project(project)
+
+
+@project_app.command("drop-folder")
+def project_drop_folder(
+    name: Annotated[str, typer.Argument(help="Project name.")],
+    folder: Annotated[Path, typer.Argument(help="The folder to stop using.")],
+) -> None:
+    """Stop using a folder for a project and forget what was read from it."""
+    from jarvis import projects
+    from jarvis.store import open_store
+
+    with open_store() as store:
+        try:
+            project = projects.drop_folder(store, name, str(folder), _config())
+        except projects.ProjectError as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(2) from None
+    _show_project(project)
+
+
+@project_app.command("remove")
+def project_remove(name: Annotated[str, typer.Argument(help="Project name.")]) -> None:
+    """Remove a project and forget what was read from its folders. Mail and files on disk are untouched."""
+    from jarvis import projects
+    from jarvis.store import open_store
+
+    with open_store() as store:
+        removed = projects.remove(store, name, _config())
+    typer.echo(f"Removed {name}." if removed else f"There is no project called {name}.")
 
 
 if __name__ == "__main__":

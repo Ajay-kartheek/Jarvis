@@ -34,6 +34,7 @@ from claude_agent_sdk import (
     tool,
 )
 
+from jarvis import projects as project_registry
 from jarvis.config import Config, JobRoute
 from jarvis.store import Store, open_store
 from jarvis.timeutil import minute
@@ -163,19 +164,20 @@ def _now_line() -> str:
     return f"Today is {now:%A %d %B %Y}, {now:%H:%M} local time ({now.tzname()})."
 
 
-def private_prompt(config: Config) -> str:
+def private_prompt(config: Config, store: Store) -> str:
     accounts = ", ".join(account.email for account in config.accounts)
     projects = "; ".join(
         f"{project.name} (people include {', '.join(project.people)})" if project.people else project.name
-        for project in config.projects
+        for project in project_registry.load(store, config)
     )
-    return f"""You are Jarvis, a private assistant. You answer from a local copy of the user's work mail, calendar and Google Drive ({accounts}).
+    return f"""You are Jarvis, a private assistant working alongside the user across their engagements. You answer from a local copy of their work mail, calendar and Google Drive ({accounts}), and from the documents and code in each project's folders on this Mac.
 {_now_line()}
 The user's active projects: {projects or 'none listed'}.
 
 How to work:
 - Use search, and search more than one way (names, project tag, key phrases, date ranges) before concluding something is not there. Use read for the full text of an item that matters.
 - For schedule questions, search kind "event" with dates and order "oldest".
+- Kind "file" covers Drive files and files from project folders (their link starts with file://). Filter by project to stay inside one engagement.
 - Lead with the answer and keep it short. Write dates in full.
 - End with a "Sources" list: kind, title, date and link for each item you relied on.
 - If the copy does not hold the answer, say so plainly. Do not guess.
@@ -228,7 +230,7 @@ def _options(route: JobRoute, system_prompt: str, **extra) -> ClaudeAgentOptions
 def private_options(config: Config, store: Store, *, handover: bool = False) -> ClaudeAgentOptions:
     return _options(
         _route(config, "ask", "briefs"),
-        private_prompt(config) + (HANDOVER_NOTE if handover else ""),
+        private_prompt(config, store) + (HANDOVER_NOTE if handover else ""),
         tools=[],  # no shell, file or web tools at all
         mcp_servers={"memory": memory_server(store)},
         allowed_tools=PRIVATE_TOOLS,
