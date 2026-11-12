@@ -1,0 +1,57 @@
+# Copy this file to config.toml and fill in your own account and projects.
+# Jarvis configuration. No secrets belong in this file.
+# Secrets live in ~/.config/jarvis/ and the macOS Keychain.
+# Mirrored data lives in ~/Library/Application Support/Jarvis/.
+
+[ingest]
+months = 12                # how far back mail, calendar and Drive are copied
+
+[retention]
+transcript_days = 90       # meeting transcripts are deleted after this
+
+# Google accounts Jarvis reads. Add another [[accounts]] block, then run
+# `jarvis auth add <email>` to sign it in. Exactly one must be primary.
+[[accounts]]
+email = "you@example.com"
+primary = true
+
+# Projects Jarvis keeps a running file for. The people lists are a starting
+# point; Jarvis adds the others it finds.
+[[projects]]
+name = "Atlas"
+people = ["Priya", "Ravi"]
+
+[[projects]]
+name = "Borealis"
+people = ["Meera", "Arjun", "Kiran Rao"]
+
+# Model routing. Each job names a model and, optionally, a backend:
+#   max_login  the Claude Max plan login on this Mac (default)
+#   vertex     Claude on Google Cloud Vertex AI (Model Garden)
+#   api_key    an Anthropic API key
+[models]
+default_backend = "max_login"
+
+[models.jobs.live_answers]
+model = "claude-haiku-5-5"
+
+[models.jobs.mail_sorting]
+model = "claude-haiku-5-5"
+
+[models.jobs.drafts]
+model = "claude-sonnet-5-5"
+
+[models.jobs.briefs]
+model = "claude-sonnet-5-5"
+
+[models.jobs.research]
+model = "claude-opus-5-5"
+
+[models.jobs.project_files]
+model = "claude-opus-5-5"
+
+[models.jobs.ask]
+model = "claude-sonnet-5-5"
+
+[models.jobs.web]
+model = "claude-sonnet-5-5"
