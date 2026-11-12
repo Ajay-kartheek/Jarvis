@@ -51,6 +51,67 @@ func globalAddress(_ selector: AudioObjectPropertySelector) -> AudioObjectProper
     mElement: kAudioObjectPropertyElementMain)
 }
 
+func defaultOutputDeviceUID() throws -> String {
+  var deviceID = AudioDeviceID(kAudioObjectUnknown)
+  var deviceSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+  var deviceAddress = globalAddress(kAudioHardwarePropertyDefaultOutputDevice)
+  try check(
+    AudioObjectGetPropertyData(
+      AudioObjectID(kAudioObjectSystemObject), &deviceAddress, 0, nil, &deviceSize, &deviceID),
+    "Finding the output device")
+  var uid: CFString = "" as CFString
+  var uidSize = UInt32(MemoryLayout<CFString>.stride)
+  var uidAddress = globalAddress(kAudioDevicePropertyDeviceUID)
+  try check(
+    withUnsafeMutablePointer(to: &uid) {
+      AudioObjectGetPropertyData(deviceID, &uidAddress, 0, nil, &uidSize, $0)
+    }, "Reading the output device identifier")
+  return uid as String
+}
+
+// MARK: - System-audio permission
+//
+// macOS has no public call that asks for the "System Audio Recording"
+// permission, and on macOS 26 starting a tap without it fails rather than
+// prompting. The TCC framework's own request function shows the prompt.
+// (Same approach as AudioCap, https://github.com/insidegui/AudioCap.)
+
+enum AudioCapturePermission {
+  enum State { case allowed, denied, unknown }
+
+  private typealias Preflight = @convention(c) (CFString, CFDictionary?) -> Int32
+  private typealias Request =
+    @convention(c) (CFString, CFDictionary?, @escaping @convention(block) (Bool) -> Void) -> Void
+
+  private static let service = "kTCCServiceAudioCapture" as CFString
+  private static let framework = dlopen(
+    "/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC", RTLD_NOW)
+
+  static func state() -> State {
+    guard let framework, let symbol = dlsym(framework, "TCCAccessPreflight") else {
+      return .unknown
+    }
+    switch unsafeBitCast(symbol, to: Preflight.self)(service, nil) {
+    case 0: return .allowed
+    case 1: return .denied
+    default: return .unknown
+    }
+  }
+
+  /// Shows the macOS prompt and waits for the answer; nil if it cannot be shown.
+  static func request() -> Bool? {
+    guard let framework, let symbol = dlsym(framework, "TCCAccessRequest") else { return nil }
+    let done = DispatchSemaphore(value: 0)
+    var granted = false
+    unsafeBitCast(symbol, to: Request.self)(service, nil) { allowed in
+      granted = allowed
+      done.signal()
+    }
+    done.wait()
+    return granted
+  }
+}
+
 // MARK: - Link to the Python process
 
 final class Link {
@@ -169,8 +230,7 @@ final class Resampler {
 }
 
 /// Reports the loudest sample seen every couple of seconds, so the Python side
-/// can tell real silence from a tap that macOS is feeding zeros (which is what
-/// happens, with no error, when the audio permission is missing).
+/// can tell a working stream from a dead one.
 final class LevelMeter {
   private let link: Link
   private let source: String
@@ -212,16 +272,27 @@ final class SystemAudioTap {
   }
 
   func start() throws {
-    do {
-      try build()
-    } catch {
-      teardown()
-      throw error
-    }
+    try buildWithFallback()
     watchDefaultOutputDevice()
   }
 
-  private func build() throws {
+  /// A capture device that holds only the tap is the simplest arrangement. If
+  /// macOS refuses to start it, pair the tap with the current output device.
+  private func buildWithFallback() throws {
+    do {
+      try build(pairWithOutputDevice: false)
+    } catch let first {
+      teardown()
+      do {
+        try build(pairWithOutputDevice: true)
+      } catch {
+        teardown()
+        throw EarsError("\(first); paired with the output device: \(error)")
+      }
+    }
+  }
+
+  private func build(pairWithOutputDevice: Bool) throws {
     // A mono mix of everything every other process plays.
     let description = CATapDescription()
     description.name = "JarvisEars"
@@ -250,21 +321,6 @@ final class SystemAudioTap {
     format = tapFormat
     self.resampler = resampler
 
-    // An aggregate device that holds only the tap gives us something to read from.
-    let aggregate: [String: Any] = [
-      kAudioAggregateDeviceNameKey: "JarvisEars",
-      kAudioAggregateDeviceUIDKey: UUID().uuidString,
-      kAudioAggregateDeviceSubDeviceListKey: [] as CFArray,
-      kAudioAggregateDeviceMainSubDeviceKey: 0,
-      kAudioAggregateDeviceIsPrivateKey: true,
-      kAudioAggregateDeviceIsStackedKey: false,
-    ]
-    var newAggregate = AudioObjectID(kAudioObjectUnknown)
-    try check(
-      AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &newAggregate),
-      "Creating the capture device")
-    aggregateID = newAggregate
-
     var uidAddress = globalAddress(kAudioTapPropertyUID)
     var uidSize = UInt32(MemoryLayout<CFString>.stride)
     var tapUID: CFString = "" as CFString
@@ -273,13 +329,39 @@ final class SystemAudioTap {
         AudioObjectGetPropertyData(tapID, &uidAddress, 0, nil, &uidSize, $0)
       }, "Reading the tap identifier")
 
-    var listAddress = globalAddress(kAudioAggregateDevicePropertyTapList)
-    let tapList = [tapUID] as CFArray
+    var aggregate: [String: Any] = [
+      kAudioAggregateDeviceNameKey: "JarvisEars",
+      kAudioAggregateDeviceUIDKey: UUID().uuidString,
+      kAudioAggregateDeviceIsPrivateKey: true,
+      kAudioAggregateDeviceIsStackedKey: false,
+    ]
+    if pairWithOutputDevice {
+      let outputUID = try defaultOutputDeviceUID()
+      aggregate[kAudioAggregateDeviceMainSubDeviceKey] = outputUID
+      aggregate[kAudioAggregateDeviceSubDeviceListKey] = [[kAudioSubDeviceUIDKey: outputUID]]
+      aggregate[kAudioAggregateDeviceTapAutoStartKey] = true
+      aggregate[kAudioAggregateDeviceTapListKey] = [
+        [kAudioSubTapUIDKey: tapUID as String, kAudioSubTapDriftCompensationKey: true]
+      ]
+    } else {
+      aggregate[kAudioAggregateDeviceSubDeviceListKey] = [] as CFArray
+      aggregate[kAudioAggregateDeviceMainSubDeviceKey] = 0
+    }
+    var newAggregate = AudioObjectID(kAudioObjectUnknown)
     try check(
-      withUnsafePointer(to: tapList) {
-        AudioObjectSetPropertyData(
-          aggregateID, &listAddress, 0, nil, UInt32(MemoryLayout<CFArray>.stride), $0)
-      }, "Attaching the tap to the capture device")
+      AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &newAggregate),
+      "Creating the capture device")
+    aggregateID = newAggregate
+
+    if !pairWithOutputDevice {
+      var listAddress = globalAddress(kAudioAggregateDevicePropertyTapList)
+      let tapList = [tapUID] as CFArray
+      try check(
+        withUnsafePointer(to: tapList) {
+          AudioObjectSetPropertyData(
+            aggregateID, &listAddress, 0, nil, UInt32(MemoryLayout<CFArray>.stride), $0)
+        }, "Attaching the tap to the capture device")
+    }
 
     var newProc: AudioDeviceIOProcID?
     try check(
@@ -288,23 +370,45 @@ final class SystemAudioTap {
         self?.process(inputData)
       }, "Creating the audio callback")
     procID = newProc
-    try check(AudioDeviceStart(aggregateID, procID), "Starting system-audio capture")
+
+    // The capture device can need a moment after the tap is attached, and
+    // after the permission prompt is answered.
+    var startStatus = AudioDeviceStart(aggregateID, procID)
+    var attempts = 1
+    while startStatus != noErr && attempts < 4 {
+      usleep(300_000)
+      startStatus = AudioDeviceStart(aggregateID, procID)
+      attempts += 1
+    }
+    try check(startStatus, "Starting system-audio capture")
 
     link.status(
       "system_started",
       [
         "sample_rate": tapFormat.sampleRate,
         "channels": Int(tapFormat.channelCount),
+        "paired_with_output_device": pairWithOutputDevice,
+        "start_attempts": attempts,
       ])
   }
 
   private func process(_ inputData: UnsafePointer<AudioBufferList>) {
-    guard let format, let resampler,
-      let buffer = AVAudioPCMBuffer(
-        pcmFormat: format, bufferListNoCopy: inputData, deallocator: nil),
-      buffer.frameLength > 0,
-      let converted = resampler.convert(buffer)
+    // The tap's stream is the last buffer: when the capture device is paired
+    // with an output device that also has inputs, those come first.
+    let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+    guard let format, let resampler, let last = buffers.last, last.mData != nil,
+      last.mDataByteSize > 0
     else { return }
+    var single = AudioBufferList(mNumberBuffers: 1, mBuffers: last)
+    let converted = withUnsafePointer(to: &single) { pointer -> (data: Data, peak: Float)? in
+      guard
+        let buffer = AVAudioPCMBuffer(
+          pcmFormat: format, bufferListNoCopy: pointer, deallocator: nil),
+        buffer.frameLength > 0
+      else { return nil }
+      return resampler.convert(buffer)
+    }
+    guard let converted else { return }
     meter.add(converted.peak)
     link.send(.system, converted.data)
   }
@@ -342,9 +446,8 @@ final class SystemAudioTap {
     link.status("system_restarting", ["reason": reason])
     teardown()
     do {
-      try build()
+      try buildWithFallback()
     } catch {
-      teardown()
       link.status("system_failed", ["error": "\(error)"])
     }
   }
@@ -455,18 +558,33 @@ do {
   fputs("JarvisEars: \(error)\n", stderr)
   exit(1)
 }
-link.status("hello", ["version": 1, "pid": Int(getpid()), "sample_rate": targetSampleRate])
+link.status("hello", ["version": 2, "pid": Int(getpid()), "sample_rate": targetSampleRate])
 
 var systemTap: SystemAudioTap?
 var micCapture: MicCapture?
 
 if !CommandLine.arguments.contains("--no-system") {
-  let tap = SystemAudioTap(link: link)
-  do {
-    try tap.start()
-    systemTap = tap
-  } catch {
-    link.status("system_failed", ["error": "\(error)"])
+  var allowed = true
+  switch AudioCapturePermission.state() {
+  case .allowed:
+    break
+  case .denied:
+    allowed = false
+  case .unknown:
+    link.status("system_permission_prompt")
+    // nil means the prompt could not be shown; try to start anyway.
+    if let granted = AudioCapturePermission.request() { allowed = granted }
+  }
+  if allowed {
+    let tap = SystemAudioTap(link: link)
+    do {
+      try tap.start()
+      systemTap = tap
+    } catch {
+      link.status("system_failed", ["error": "\(error)"])
+    }
+  } else {
+    link.status("system_denied")
   }
 }
 
