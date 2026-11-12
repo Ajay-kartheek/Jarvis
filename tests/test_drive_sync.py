@@ -62,12 +62,12 @@ def test_first_run_lists_the_window_and_reads_each_kind(store):
     assert store.get_state(ACCOUNT, "drive", "changes_token") == "10"
 
 
-def test_query_covers_viewed_or_changed_files_and_skips_folders_and_trash(store):
+def test_query_covers_files_the_account_opened_and_skips_folders_and_trash(store):
     api = FakeDrive([file("d1")])
     run(api, store)
     query = api.queries[0]
     assert "trashed = false" in query
-    assert "viewedByMeTime >" in query and "modifiedTime >" in query
+    assert "viewedByMeTime >" in query and "modifiedTime" not in query
     assert drive_sync.FOLDER in query
 
 

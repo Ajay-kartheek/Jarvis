@@ -1,8 +1,9 @@
 """Mirror Google Drive into the local store (read-only).
 
-Keeps the name, owner, dates and link of every file the account viewed or
-changed inside the ingest window, and the text of Google Docs, Sheets and
-Slides. The first run lists the window; later runs follow Drive's change
+Keeps the name, owner, dates and link of every file the account opened
+inside the ingest window, and the text of Google Docs, Sheets and Slides.
+Files that only other people touched are left out: on shared drives they
+outnumber the user's own by far. The first run lists the window; later runs follow Drive's change
 feed. A file that fails to export is recorded and the run carries on.
 """
 
@@ -60,11 +61,11 @@ def parse_file(item: dict) -> FileRecord:
 
 
 def in_window(item: dict, cutoff: str) -> bool:
-    """True if the account viewed the file, or anyone changed it, since ``cutoff``.
+    """True if the account opened the file since ``cutoff``.
 
     Drive's timestamps are RFC 3339 in UTC, so comparing the strings works.
     """
-    return any((item.get(key) or "") > cutoff for key in ("viewedByMeTime", "modifiedTime"))
+    return (item.get("viewedByMeTime") or "") > cutoff
 
 
 def sync(api, store: Store, account: str, ingest_months: int, *,
@@ -93,8 +94,7 @@ def sync(api, store: Store, account: str, ingest_months: int, *,
 def _list_window(api, store: Store, account: str, cutoff: str, summary: dict,
                  progress: Progress) -> None:
     query = (
-        f"trashed = false and mimeType != '{FOLDER}' and "
-        f"(viewedByMeTime > '{cutoff}' or modifiedTime > '{cutoff}')"
+        f"trashed = false and mimeType != '{FOLDER}' and viewedByMeTime > '{cutoff}'"
     )
     seen: set[str] = set()
     page_token = None
