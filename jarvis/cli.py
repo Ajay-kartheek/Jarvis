@@ -413,5 +413,53 @@ def project_remove(name: Annotated[str, typer.Argument(help="Project name.")]) -
     typer.echo(f"Removed {name}." if removed else f"There is no project called {name}.")
 
 
+@app.command("meeting")
+def meeting(
+    project: Annotated[
+        str | None, typer.Option("--project", help="The engagement this call belongs to. Default: from the calendar.")
+    ] = None,
+    seconds: Annotated[
+        float | None, typer.Option(help="Stop after this many seconds. Default: until Ctrl-C.")
+    ] = None,
+    headphones: Annotated[
+        bool,
+        typer.Option("--headphones", help="Keep the microphone on while others talk (no echo on headphones)."),
+    ] = False,
+    say: Annotated[str | None, typer.Option(hidden=True, help="Speak this sentence as a self-test.")] = None,
+) -> None:
+    """Listen to a call and suggest what to say, using the engagement's mail, calendar and folders."""
+    import asyncio
+    from datetime import datetime
+
+    from jarvis import meeting as live
+
+    folder = paths.ensure_data_dir() / "transcripts"
+    folder.mkdir(exist_ok=True)
+    out = folder / f"{datetime.now():%Y-%m-%d-%H%M}.jsonl"
+
+    def show(kind: str, text: str) -> None:
+        stamp = datetime.now().strftime("%H:%M:%S")
+        if kind == "info":
+            typer.secho(text, fg=typer.colors.BRIGHT_BLACK)
+        elif kind == "Jarvis":
+            typer.secho(f"           SAY  {text}", fg=typer.colors.GREEN, bold=True)
+        else:
+            typer.echo(f"[{stamp}] {kind}: {text}")
+
+    try:
+        asyncio.run(
+            live.run(
+                _config(), project_name=project, seconds=seconds, headphones=headphones, say=say,
+                out=out, show=show,
+            )
+        )
+    except ValueError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(2) from None
+    except KeyboardInterrupt:
+        pass
+    typer.secho(f"Transcript: {out}", fg=typer.colors.BRIGHT_BLACK)
+
+
 if __name__ == "__main__":
     app()

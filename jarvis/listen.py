@@ -275,8 +275,15 @@ def run(args) -> int:
     """Listen until ``args.seconds`` pass (or Ctrl-C when it is None).
 
     ``args`` carries: seconds, wav, say, say_after, partials, out (a path for
-    the transcript, or None).
+    the transcript, or None). Optional extras for callers that build on the
+    transcript: on_sentence(speaker, text) and on_partial(speaker, text) are
+    called from this thread, stop is a threading.Event that ends the run, and
+    quiet turns off the printed lines and figures.
     """
+    on_sentence = getattr(args, "on_sentence", None)
+    on_partial = getattr(args, "on_partial", None)
+    stop = getattr(args, "stop", None)
+    quiet = getattr(args, "quiet", False)
     started_loading = time.perf_counter()
     model = from_pretrained(MODEL)
     model.generate(get_logmel(mx.zeros(SAMPLE_RATE), model.preprocessor_config))  # warm up
@@ -295,7 +302,10 @@ def run(args) -> int:
 
     def emit(source: str, text: str) -> None:
         elapsed = audio.position / SAMPLE_RATE if args.wav else time.monotonic() - started
-        print(f"[{int(elapsed // 60):02d}:{int(elapsed % 60):02d}] {LABELS[source]}: {text}", flush=True)
+        if not quiet:
+            print(f"[{int(elapsed // 60):02d}:{int(elapsed % 60):02d}] {LABELS[source]}: {text}", flush=True)
+        if on_sentence:
+            on_sentence(LABELS[source], text)
         if args.out:
             record = {"at": datetime.now().astimezone().isoformat(timespec="seconds"),
                       "speaker": LABELS[source], "text": text}
@@ -303,7 +313,11 @@ def run(args) -> int:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     try:
-        while audio.alive and (args.wav or args.seconds is None or time.monotonic() - started < args.seconds):
+        while (
+            audio.alive
+            and not (stop and stop.is_set())
+            and (args.wav or args.seconds is None or time.monotonic() - started < args.seconds)
+        ):
             if not args.wav:
                 time.sleep(poll_seconds)
                 if args.say and not spoken and time.monotonic() - started >= args.say_after:
@@ -323,9 +337,11 @@ def run(args) -> int:
                         text.add(kept)
                 for sentence in text.step(pause=paused):
                     emit(source, sentence)
-                if args.partials and text.partial != shown_partial[source]:
+                if text.partial != shown_partial[source]:
                     shown_partial[source] = text.partial
-                    if text.partial:
+                    if on_partial:
+                        on_partial(LABELS[source], text.partial)
+                    if args.partials and text.partial and not quiet:
                         print(f"        {LABELS[source]} ... {text.partial}", flush=True)
     except KeyboardInterrupt:
         pass
@@ -347,6 +363,7 @@ def run(args) -> int:
             if text.audio_seconds
             else None,
         }
-    print(json.dumps(stats, indent=2))
+    if not quiet:
+        print(json.dumps(stats, indent=2))
     return 0
 
