@@ -76,7 +76,7 @@ _KEY_NAMES = re.compile(
 )
 _KEY_FOLDERS = re.compile(r"/(docs?|planning|kickoff|sow|proposal|requirements)/", re.IGNORECASE)
 
-Show = Callable[[str, str], None]
+Emit = Callable[[dict], None]
 
 
 @dataclass
@@ -210,19 +210,21 @@ def excerpt(body: str, words: list[str], width: int = EXCERPT_CHARS) -> str:
     return " ".join(body[start : start + width].split())
 
 
-def retrieve(store: Store, project: Project | None, text: str) -> list[str]:
+def retrieve(store: Store, project: Project | None, text: str) -> tuple[list[str], list[dict]]:
+    """Excerpts that match ``text``, and a short description of where each came from."""
     words = keywords(text)
     if not words:
-        return []
+        return [], []
     hits = store.search(
         " ".join(words), project=project.name if project else None, limit=EXCERPTS_PER_QUESTION
     )
-    found = []
+    found, sources = [], []
     for hit in hits:
         doc = store.get_doc(hit.doc_id)
         if doc is not None and doc.body:
             found.append(f"[{hit.kind} | {day(hit.ts)} | {hit.title}]\n{excerpt(doc.body, words)}")
-    return found
+            sources.append({"kind": hit.kind, "title": hit.title, "date": day(hit.ts)})
+    return found, sources
 
 
 def needs_a_look(sentence: str) -> bool:
@@ -269,8 +271,14 @@ class Advisor:
             await self._client.disconnect()
             self._client = None
 
-    async def suggest(self, tail: list[tuple[str, str]], latest: str, excerpts: list[str]) -> tuple[str | None, float]:
-        """Returns the suggestion (None when no reply is needed) and seconds to the first words."""
+    async def suggest(self, tail: list[tuple[str, str]], latest: str, excerpts: list[str], *,
+                      forced: bool = False,
+                      on_text: Callable[[str], None] | None = None) -> tuple[str | None, float]:
+        """Returns the suggestion (None when no reply is needed) and seconds to the first words.
+
+        ``forced`` means the user asked for a suggestion, so NONE is not an option.
+        ``on_text`` receives the text so far as it streams in.
+        """
         if self._turns >= TURNS_BEFORE_RESET:
             await self.stop()
             await self.start()
@@ -279,16 +287,21 @@ class Advisor:
         prompt = (
             f"TRANSCRIPT (most recent last)\n{lines}\n\n"
             f"EXCERPTS FROM THE USER'S MAIL, CALENDAR AND FILES\n{found}\n\n"
-            f'LATEST FROM THEM: "{latest}"\n\nWhat should the user say? Answer NONE if no reply is needed.'
+            f'LATEST FROM THEM: "{latest}"\n\n'
+            + (
+                "The user asked for a suggestion now, so give one; do not answer NONE."
+                if forced
+                else "What should the user say? Answer NONE if no reply is needed."
+            )
         )
-        text, first = await self._ask(prompt)
+        text, first = await self._ask(prompt, on_text)
         self._turns += 1
         cleaned = text.strip()
         if not cleaned or cleaned.upper().startswith(NOTHING):
             return None, first
         return cleaned, first
 
-    async def _ask(self, prompt: str) -> tuple[str, float]:
+    async def _ask(self, prompt: str, on_text: Callable[[str], None] | None = None) -> tuple[str, float]:
         assert self._client is not None
         started = time.perf_counter()
         first = None
@@ -302,6 +315,9 @@ class Advisor:
                     if first is None:
                         first = time.perf_counter() - started
                     text += delta.get("text", "")
+                    # Hold back the first few characters: they may spell NONE.
+                    if on_text and len(text) > len(NOTHING) and not text.lstrip().upper().startswith(NOTHING):
+                        on_text(text)
             elif isinstance(message, ResultMessage) and not text:
                 text = message.result or ""
         return text, first if first is not None else time.perf_counter() - started
@@ -325,64 +341,104 @@ def prepare(store: Store, config: Config, project_name: str | None, now: float) 
 
 async def run(config: Config, *, project_name: str | None = None, seconds: float | None = None,
               headphones: bool = False, say: str | None = None, out: Path | None = None,
-              show: Show | None = None) -> None:
+              emit: Emit | None = None, inbox: asyncio.Queue | None = None) -> None:
     """Listen and advise until ``seconds`` pass or the task is cancelled.
 
-    ``show(kind, text)`` receives what to display: kind is "info", "Them",
-    "You" or "Jarvis".
+    ``emit(event)`` receives what happens as dictionaries with a ``type``:
+    info, meeting, ready, partial, sentence, level, thinking, suggestion_delta,
+    suggestion and no_suggestion. Putting ``("command", "suggest", None)`` on
+    ``inbox`` asks for a suggestion on the latest remark.
     """
     from jarvis import listen  # loads the speech libraries
 
-    show = show or (lambda kind, text: print(f"{kind}: {text}", flush=True))
+    emit = emit or (lambda event: print(event, flush=True))
     store = open_store()
     advisor = None
     stop = threading.Event()
     listener = None
+    answering: asyncio.Task | None = None
     try:
         meeting = prepare(store, config, project_name, time.time())
-        engagement = meeting.project.name if meeting.project else "not identified (pass --project to set it)"
-        show("info", f"Meeting: {meeting.title} | Engagement: {engagement} | Brief: {len(meeting.brief):,} characters")
+        emit({
+            "type": "meeting", "title": meeting.title,
+            "engagement": meeting.project.name if meeting.project else None,
+            "brief_chars": len(meeting.brief),
+        })
 
         advisor = Advisor(config.route("live_answers").model, meeting.brief)
         loop = asyncio.get_running_loop()
-        heard: asyncio.Queue = asyncio.Queue()
+        inbox = inbox if inbox is not None else asyncio.Queue()
+
+        def post(kind: str, first, second) -> None:
+            loop.call_soon_threadsafe(inbox.put_nowait, (kind, first, second))
+
         listener = threading.Thread(
             target=listen.run,
             args=(SimpleNamespace(
                 seconds=seconds, wav=None, say=say, say_after=10.0, partials=False, out=None,
                 echo_guard=not headphones, quiet=True, stop=stop,
-                on_sentence=lambda speaker, text: loop.call_soon_threadsafe(heard.put_nowait, (speaker, text)),
+                on_sentence=lambda speaker, text: post("sentence", speaker, text),
+                on_partial=lambda speaker, text: post("partial", speaker, text),
+                on_level=lambda source, level: post("level", source, level),
             ),),
             daemon=True,
         )
         listener.start()
         await advisor.start()
-        show("info", "Ready. Listening.")
+        emit({"type": "ready"})
 
         tail: deque = deque(maxlen=TRANSCRIPT_TAIL)
-        while listener.is_alive() or not heard.empty():
+        waiting: tuple[str, bool] | None = None
+        counter = 0
+
+        async def answer(number: int, latest: str, forced: bool) -> None:
+            emit({"type": "thinking", "id": number, "question": latest})
+            excerpts, sources = retrieve(store, meeting.project, latest)
+            suggestion, first = await advisor.suggest(
+                list(tail), latest, excerpts, forced=forced,
+                on_text=lambda text: emit({"type": "suggestion_delta", "id": number, "text": text}),
+            )
+            if suggestion is None:
+                emit({"type": "no_suggestion", "id": number})
+                return
+            emit({
+                "type": "suggestion", "id": number, "question": latest, "text": suggestion,
+                "sources": sources, "seconds": round(first, 2), "at": _now(),
+            })
+            _record(out, "Jarvis", suggestion)
+
+        while listener.is_alive() or not inbox.empty():
             try:
-                batch = [await asyncio.wait_for(heard.get(), timeout=0.5)]
+                batch = [await asyncio.wait_for(inbox.get(), timeout=0.25)]
             except asyncio.TimeoutError:
-                continue
-            while not heard.empty():
-                batch.append(heard.get_nowait())
-            latest = None
-            for speaker, text in batch:
-                tail.append((speaker, text))
-                show(speaker, text)
-                _record(out, speaker, text)
-                if speaker == "Them" and needs_a_look(text):
-                    latest = text
-            if latest is None:
-                continue
-            excerpts = retrieve(store, meeting.project, latest)
-            suggestion, first = await advisor.suggest(list(tail), latest, excerpts)
-            if suggestion:
-                show("Jarvis", f"{suggestion}  ({first:.1f} s)")
-                _record(out, "Jarvis", suggestion)
+                batch = []
+            while not inbox.empty():
+                batch.append(inbox.get_nowait())
+            for kind, first, second in batch:
+                if kind == "partial":
+                    emit({"type": "partial", "speaker": first, "text": second})
+                elif kind == "level":
+                    emit({"type": "level", "source": first, "level": round(second, 3)})
+                elif kind == "sentence":
+                    tail.append((first, second))
+                    emit({"type": "sentence", "speaker": first, "text": second, "at": _now()})
+                    _record(out, first, second)
+                    if first == "Them" and needs_a_look(second):
+                        waiting = (second, False)
+                elif kind == "command" and first == "suggest":
+                    remarks = [text for speaker, text in tail if speaker == "Them"] or [text for _, text in tail]
+                    if remarks:
+                        waiting = (remarks[-1], True)
+            if waiting and (answering is None or answering.done()):
+                counter += 1
+                answering = asyncio.create_task(answer(counter, *waiting))
+                waiting = None
+        if answering is not None:
+            await answering
     finally:
         stop.set()
+        if answering is not None and not answering.done():
+            answering.cancel()
         if listener is not None:
             listener.join(timeout=5)
         if advisor is not None:
@@ -390,9 +446,13 @@ async def run(config: Config, *, project_name: str | None = None, seconds: float
         store.close()
 
 
+def _now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
 def _record(out: Path | None, speaker: str, text: str) -> None:
     if out is None:
         return
-    line = {"at": datetime.now().astimezone().isoformat(timespec="seconds"), "speaker": speaker, "text": text}
+    line = {"at": _now(), "speaker": speaker, "text": text}
     with open(out, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(line, ensure_ascii=False) + "\n")

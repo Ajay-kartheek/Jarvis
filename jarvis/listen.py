@@ -277,11 +277,13 @@ def run(args) -> int:
     ``args`` carries: seconds, wav, say, say_after, partials, out (a path for
     the transcript, or None). Optional extras for callers that build on the
     transcript: on_sentence(speaker, text) and on_partial(speaker, text) are
-    called from this thread, stop is a threading.Event that ends the run, and
+    called from this thread, on_level(source, level) reports loudness from 0
+    to 1 about ten times a second, stop is a threading.Event that ends the run, and
     quiet turns off the printed lines and figures.
     """
     on_sentence = getattr(args, "on_sentence", None)
     on_partial = getattr(args, "on_partial", None)
+    on_level = getattr(args, "on_level", None)
     stop = getattr(args, "stop", None)
     quiet = getattr(args, "quiet", False)
     started_loading = time.perf_counter()
@@ -326,7 +328,11 @@ def run(args) -> int:
             for source in sources:
                 gate, text = gates[source], texts[source]
                 paused = False
+                loudest = None
                 for chunk in audio.poll(source):
+                    if on_level and len(chunk):
+                        level = float(np.sqrt(np.mean(np.square(chunk, dtype=np.float64))))
+                        loudest = level if loudest is None else max(loudest, level)
                     if source == "mic" and echo_guard and gates["system"].is_open:
                         # While the other side is talking, the microphone mostly
                         # hears the speakers, which would come out as garbled "You" lines.
@@ -335,6 +341,8 @@ def run(args) -> int:
                     paused = paused or gate.just_closed
                     if kept is not None:
                         text.add(kept)
+                if loudest is not None:
+                    on_level(source, min(1.0, loudest * 12))
                 for sentence in text.step(pause=paused):
                     emit(source, sentence)
                 if text.partial != shown_partial[source]:

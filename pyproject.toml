@@ -5,6 +5,7 @@ description = "Personal assistant: Google mirror, project files and a live meeti
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "claude-agent-sdk>=0.2.180",
+    "fastapi>=0.162.5",
     "google-api-python-client>=2.202.0",
     "google-auth-oauthlib>=1.5.0",
     "keyring>=25.7.0",
@@ -15,6 +16,7 @@ dependencies = [
     "python-docx>=1.2.0",
     "python-pptx>=1.0.2",
     "typer>=0.29.1",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [project.scripts]

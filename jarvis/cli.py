@@ -437,20 +437,26 @@ def meeting(
     folder.mkdir(exist_ok=True)
     out = folder / f"{datetime.now():%Y-%m-%d-%H%M}.jsonl"
 
-    def show(kind: str, text: str) -> None:
-        stamp = datetime.now().strftime("%H:%M:%S")
-        if kind == "info":
-            typer.secho(text, fg=typer.colors.BRIGHT_BLACK)
-        elif kind == "Jarvis":
-            typer.secho(f"           SAY  {text}", fg=typer.colors.GREEN, bold=True)
-        else:
-            typer.echo(f"[{stamp}] {kind}: {text}")
+    def show(event: dict) -> None:
+        kind = event["type"]
+        if kind == "meeting":
+            engagement = event["engagement"] or "not identified (pass --project to set it)"
+            typer.secho(
+                f"Meeting: {event['title']} | Engagement: {engagement} | Brief: {event['brief_chars']:,} characters",
+                fg=typer.colors.BRIGHT_BLACK,
+            )
+        elif kind == "ready":
+            typer.secho("Ready. Listening.", fg=typer.colors.BRIGHT_BLACK)
+        elif kind == "sentence":
+            typer.echo(f"[{datetime.now():%H:%M:%S}] {event['speaker']}: {event['text']}")
+        elif kind == "suggestion":
+            typer.secho(f"           SAY  {event['text']}  ({event['seconds']:.1f} s)", fg=typer.colors.GREEN, bold=True)
 
     try:
         asyncio.run(
             live.run(
                 _config(), project_name=project, seconds=seconds, headphones=headphones, say=say,
-                out=out, show=show,
+                out=out, emit=show,
             )
         )
     except ValueError as exc:
@@ -459,6 +465,26 @@ def meeting(
     except KeyboardInterrupt:
         pass
     typer.secho(f"Transcript: {out}", fg=typer.colors.BRIGHT_BLACK)
+
+
+@app.command("ui")
+def ui(
+    port: Annotated[int, typer.Option(help="Port on 127.0.0.1.")] = 8765,
+    browser: Annotated[bool, typer.Option(help="Open the interface in the browser.")] = True,
+) -> None:
+    """Start the Jarvis interface: meeting panel, ask and today."""
+    import threading
+    import webbrowser
+
+    import uvicorn
+
+    from jarvis.server import create_app
+
+    url = f"http://127.0.0.1:{port}"
+    typer.echo(f"Jarvis interface: {url}  (Ctrl-C to stop)")
+    if browser:
+        threading.Timer(1.0, webbrowser.open, args=(url,)).start()
+    uvicorn.run(create_app(_config()), host="127.0.0.1", port=port, log_level="warning")
 
 
 if __name__ == "__main__":
