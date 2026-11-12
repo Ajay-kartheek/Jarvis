@@ -291,5 +291,37 @@ def web(question: Annotated[str, typer.Argument(help="What to look up on the pub
     _show_answer(answer)
 
 
+@app.command("listen")
+def listen(
+    seconds: Annotated[
+        float | None, typer.Option(help="Stop after this many seconds. Default: until Ctrl-C.")
+    ] = None,
+    partials: Annotated[bool, typer.Option("--partials", help="Also show the sentence being spoken.")] = False,
+    headphones: Annotated[
+        bool,
+        typer.Option("--headphones", help="Keep the microphone on while others talk (no echo on headphones)."),
+    ] = False,
+    say: Annotated[str | None, typer.Option(hidden=True, help="Speak this sentence as a self-test.")] = None,
+) -> None:
+    """Transcribe a call live on this Mac: Them (system audio) and You (microphone)."""
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    # Imported here because it loads the speech model's libraries.
+    from jarvis import listen as listener
+
+    folder = paths.ensure_data_dir() / "transcripts"
+    folder.mkdir(exist_ok=True)
+    out = folder / f"{datetime.now():%Y-%m-%d-%H%M}.jsonl"
+    typer.echo(f"Listening. Transcript: {out}  (Ctrl-C to stop)")
+    code = listener.run(
+        SimpleNamespace(
+            seconds=seconds, wav=None, say=say, say_after=8.0, partials=partials, out=out,
+            echo_guard=not headphones,
+        )
+    )
+    raise typer.Exit(code)
+
+
 if __name__ == "__main__":
     app()

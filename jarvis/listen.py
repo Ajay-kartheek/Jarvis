@@ -1,11 +1,8 @@
-"""Live transcript prototype: JarvisEars audio -> on-device speech-to-text.
+"""Live transcript: JarvisEars audio -> on-device speech-to-text.
 
-    uv run --no-project --python 3.12 --with parakeet-mlx --with numpy \
-        scripts/ears_listen.py --seconds 60
-
-Prints one line per finished sentence, labelled Them (system audio) or You
-(microphone). With --wav it replays a 16 kHz mono WAV file as the system stream
-instead of starting the helper, which makes runs repeatable.
+``jarvis listen`` prints one line per finished sentence, labelled Them (system
+audio) or You (microphone), and saves the same lines to a transcript file.
+Audio is recognised on this Mac and is never stored.
 
 How it recognises speech: the model is accurate when it sees a whole stretch of
 speech at once and poor when fed quarter-second pieces. So each source keeps
@@ -25,6 +22,7 @@ import sys
 import threading
 import time
 import wave
+from datetime import datetime
 from pathlib import Path
 
 import mlx.core as mx
@@ -273,15 +271,12 @@ class WindowText:
         return "".join(token.text for token in tokens).strip()
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--seconds", type=float, default=60)
-    parser.add_argument("--wav", type=Path, help="replay this 16 kHz mono WAV as the system stream")
-    parser.add_argument("--say", help="sentence for the Mac to speak during the run")
-    parser.add_argument("--say-after", type=float, default=8)
-    parser.add_argument("--partials", action="store_true", help="also print the sentence in progress")
-    args = parser.parse_args()
+def run(args) -> int:
+    """Listen until ``args.seconds`` pass (or Ctrl-C when it is None).
 
+    ``args`` carries: seconds, wav, say, say_after, partials, out (a path for
+    the transcript, or None).
+    """
     started_loading = time.perf_counter()
     model = from_pretrained(MODEL)
     model.generate(get_logmel(mx.zeros(SAMPLE_RATE), model.preprocessor_config))  # warm up
@@ -293,6 +288,7 @@ def main() -> int:
     gates = {"system": Gate(floor=0.0008), "mic": Gate(floor=0.006)}
     audio = WavAudio(args.wav, poll_seconds) if args.wav else HelperAudio()
 
+    echo_guard = getattr(args, "echo_guard", True)
     started = time.monotonic()
     spoken = False
     shown_partial = dict.fromkeys(sources, "")
@@ -300,9 +296,14 @@ def main() -> int:
     def emit(source: str, text: str) -> None:
         elapsed = audio.position / SAMPLE_RATE if args.wav else time.monotonic() - started
         print(f"[{int(elapsed // 60):02d}:{int(elapsed % 60):02d}] {LABELS[source]}: {text}", flush=True)
+        if args.out:
+            record = {"at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                      "speaker": LABELS[source], "text": text}
+            with open(args.out, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     try:
-        while audio.alive and (args.wav or time.monotonic() - started < args.seconds):
+        while audio.alive and (args.wav or args.seconds is None or time.monotonic() - started < args.seconds):
             if not args.wav:
                 time.sleep(poll_seconds)
                 if args.say and not spoken and time.monotonic() - started >= args.say_after:
@@ -312,6 +313,10 @@ def main() -> int:
                 gate, text = gates[source], texts[source]
                 paused = False
                 for chunk in audio.poll(source):
+                    if source == "mic" and echo_guard and gates["system"].is_open:
+                        # While the other side is talking, the microphone mostly
+                        # hears the speakers, which would come out as garbled "You" lines.
+                        chunk = np.zeros_like(chunk)
                     kept = gate.filter(chunk)
                     paused = paused or gate.just_closed
                     if kept is not None:
@@ -322,6 +327,8 @@ def main() -> int:
                     shown_partial[source] = text.partial
                     if text.partial:
                         print(f"        {LABELS[source]} ... {text.partial}", flush=True)
+    except KeyboardInterrupt:
+        pass
     finally:
         audio.close()
 
@@ -343,6 +350,3 @@ def main() -> int:
     print(json.dumps(stats, indent=2))
     return 0
 
-
-if __name__ == "__main__":
-    sys.exit(main())

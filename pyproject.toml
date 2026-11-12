@@ -8,6 +8,8 @@ dependencies = [
     "google-api-python-client>=2.202.0",
     "google-auth-oauthlib>=1.5.0",
     "keyring>=25.7.0",
+    "numpy>=2.5.4",
+    "parakeet-mlx>=0.7.0",
     "typer>=0.29.1",
 ]
 
