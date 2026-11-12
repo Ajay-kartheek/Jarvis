@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+
+# Secrets and data never live in the project folder, but ignore them anyway
+*client_secret*.json
+*credentials*.json
+*service-account*.json
+*.key
+.env
+.env.*
+secrets/
+data/
+
+# macOS
+.DS_Store
+
+# Local settings hold names and addresses, so they stay out of the repository
+config.toml

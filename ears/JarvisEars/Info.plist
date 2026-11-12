@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>JarvisEars</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.ajay.jarvis.ears</string>
+	<key>CFBundleName</key>
+	<string>JarvisEars</string>
+	<key>CFBundleDisplayName</key>
+	<string>Jarvis Ears</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.2</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Jarvis transcribes what you say in meetings. The audio stays on this Mac.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Jarvis transcribes what other people say in your meetings. The audio stays on this Mac.</string>
+</dict>
+</plist>
