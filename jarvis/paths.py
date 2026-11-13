@@ -19,6 +19,10 @@ def secrets_dir() -> Path:
 
 
 def data_dir() -> Path:
+    """Where the local copy, notes and transcripts live. ``JARVIS_DATA`` points it elsewhere, for development."""
+    override = os.environ.get("JARVIS_DATA")
+    if override:
+        return Path(override).expanduser()
     return Path.home() / "Library" / "Application Support" / "Jarvis"
 
 

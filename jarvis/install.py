@@ -7,6 +7,11 @@ and leaves the data alone.
 
 The app is copied out of the project folder because launchd cannot start a
 program that lives under ~/Documents.
+
+The running Jarvis does not use the code in the project folder either. It runs
+from a release: a copy of the last commit with its own Python environment,
+kept next to the data. Work in progress here therefore cannot disturb a call;
+``jarvis deploy`` moves the release to the current commit.
 """
 
 from __future__ import annotations
@@ -16,7 +21,6 @@ import os
 import plistlib
 import shutil
 import subprocess
-import sys
 import time
 import urllib.request
 from collections.abc import Callable
@@ -64,15 +68,23 @@ def app_config_file() -> Path:
     return paths.data_dir() / "app.json"
 
 
+def release_dir() -> Path:
+    return paths.data_dir() / "release"
+
+
 def logs_dir() -> Path:
     return Path.home() / "Library" / "Logs" / "Jarvis"
 
 
 def app_config(port: int) -> dict:
-    """What the app needs to start the background service."""
+    """What the app needs to start the background service: the release's own program, the user's settings."""
+    release = release_dir()
     return {
-        "daemon": [str(Path(sys.executable).parent / "jarvis"), "daemon", "--port", str(port)],
-        "cwd": str(PROJECT),
+        "daemon": [
+            "/usr/bin/env", f"JARVIS_CONFIG={PROJECT / 'config.toml'}",
+            str(release / ".venv" / "bin" / "jarvis"), "daemon", "--port", str(port),
+        ],
+        "cwd": str(release),
         "port": port,
         "call_apps": list(CALL_APPS),
         "hide_from_screen_share": True,
@@ -129,16 +141,58 @@ def answering(port: int) -> bool:
         return False
 
 
+def build_interface(progress: Progress = print, *, force: bool = False) -> None:
+    if not force and (PROJECT / "ui" / "dist" / "index.html").exists():
+        return
+    if shutil.which("npm") is None:
+        raise InstallError("The interface is not built and npm is not installed. Install Node.js, then run this again.")
+    progress("Building the interface ...")
+    if not (PROJECT / "ui" / "node_modules").is_dir():
+        _run(["npm", "install", "--no-audit", "--no-fund"], cwd=PROJECT / "ui")
+    _run(["npm", "run", "build"], cwd=PROJECT / "ui")
+
+
+def deploy(progress: Progress = print) -> str:
+    """Bring the release to the current commit and return its short id.
+
+    Only committed code goes in. The interface is built here and copied over,
+    so the release needs no Node.js tooling of its own.
+    """
+    uv = shutil.which("uv")
+    if uv is None:
+        raise InstallError("uv is not installed; it is needed to set up the release's Python environment.")
+    head = _run(["git", "-C", str(PROJECT), "rev-parse", "HEAD"]).stdout.strip()
+    if _run(["git", "-C", str(PROJECT), "status", "--porcelain", "--untracked-files=no"]).stdout.strip():
+        progress("Note: changes that are not committed yet are left out of the release.")
+    build_interface(progress)
+    release = release_dir()
+    paths.ensure_data_dir()
+    if not (release / ".git").is_dir():
+        _run(["git", "clone", "--quiet", "--no-checkout", str(PROJECT), str(release)])
+    _run(["git", "-C", str(release), "fetch", "--quiet", "origin"])
+    _run(["git", "-C", str(release), "checkout", "--quiet", "--detach", head])
+    progress("Setting up the release's Python environment ...")
+    _run([uv, "sync", "--frozen", "--no-dev", "--project", str(release)])
+    dist = release / "ui" / "dist"
+    if dist.exists():
+        shutil.rmtree(dist)
+    shutil.copytree(PROJECT / "ui" / "dist", dist)
+    progress(f"Release: {release} at {head[:7]}")
+    return head[:7]
+
+
+def restart(progress: Progress = print) -> None:
+    """Start the installed Jarvis again so it picks up a new release."""
+    if is_loaded():
+        _run(["launchctl", "kickstart", "-k", f"{_domain()}/{LABEL}"])
+        progress("Restarted Jarvis.")
+
+
 def install(port: int = DEFAULT_PORT, *, rebuild: bool = False, progress: Progress = print) -> None:
     if rebuild or not BUILT_APP.is_dir():
         progress("Building the app ...")
         _run(["bash", str(PROJECT / "app" / "build.sh")])
-    if not (PROJECT / "ui" / "dist" / "index.html").exists():
-        if shutil.which("npm") is None:
-            raise InstallError("The interface is not built and npm is not installed. Install Node.js, then run this again.")
-        progress("Building the interface ...")
-        _run(["npm", "install", "--no-audit", "--no-fund"], cwd=PROJECT / "ui")
-        _run(["npm", "run", "build"], cwd=PROJECT / "ui")
+    deploy(progress)
 
     stop(progress)
     target = installed_app()
@@ -172,6 +226,7 @@ def uninstall(progress: Progress = print) -> None:
     stop(progress)
     agent_file().unlink(missing_ok=True)
     app_config_file().unlink(missing_ok=True)
-    if installed_app().exists():
-        shutil.rmtree(installed_app())
+    for folder in (installed_app(), release_dir()):
+        if folder.exists():
+            shutil.rmtree(folder)
     progress("Removed the app and its login entry. Your data and settings are untouched.")

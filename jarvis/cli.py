@@ -548,6 +548,19 @@ def install_command(
     typer.echo("Control+Option+J shows and hides Jarvis. It listens by itself when a call starts.")
 
 
+@app.command("deploy")
+def deploy_command() -> None:
+    """Move the running Jarvis to the code of the latest commit, then restart it."""
+    from jarvis import install
+
+    try:
+        install.deploy(progress=typer.echo)
+        install.restart(progress=typer.echo)
+    except install.InstallError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from None
+
+
 @app.command("uninstall")
 def uninstall_command() -> None:
     """Stop Jarvis running by itself and remove the app. Data and settings stay."""
