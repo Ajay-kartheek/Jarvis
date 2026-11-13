@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import logging
 import os
 import socket
 import struct
@@ -31,6 +32,8 @@ import numpy as np
 from parakeet_mlx import from_pretrained
 from parakeet_mlx.audio import get_logmel
 
+log = logging.getLogger("jarvis")
+
 MODEL = "mlx-community/parakeet-tdt-0.6b-v2"
 SAMPLE_RATE = 16_000
 APP = Path(__file__).resolve().parent.parent / "app" / "build" / "Jarvis.app"
@@ -45,6 +48,9 @@ STEP_SECONDS = 0.5  # new audio needed before the window is decoded again
 SETTLE_SECONDS = 1.5  # a sentence must have ended this long ago to be final
 MAX_WINDOW_SECONDS = 15.0  # cut an unbroken stretch of speech at this length
 MIN_WINDOW_SECONDS = 0.3
+# A microphone line the recogniser was this unsure of is dropped: it is usually
+# someone else's voice across the room, which comes out as invented words.
+MIC_MIN_CONFIDENCE = 0.6
 
 
 def load_model():
@@ -226,6 +232,12 @@ class Gate:
         return None
 
 
+class Heard(str):
+    """A recognised sentence that remembers how sure the recogniser was of it, from 0 to 1."""
+
+    confidence: float = 1.0
+
+
 class WindowText:
     """Keeps the audio of the sentence in progress and decodes it as a whole.
 
@@ -327,7 +339,10 @@ class WindowText:
 
     @staticmethod
     def _join(tokens) -> str:
-        return "".join(token.text for token in tokens).strip()
+        heard = Heard("".join(token.text for token in tokens).strip())
+        scores = [getattr(token, "confidence", 1.0) for token in tokens]
+        heard.confidence = sum(scores) / len(scores) if scores else 1.0
+        return heard
 
 
 def run(args) -> int:
@@ -415,6 +430,12 @@ def _listen(args, model, load_seconds: float) -> int:
                 if loudest is not None:
                     on_level(source, min(1.0, loudest * 12))
                 for sentence in text.step(pause=paused):
+                    if source == "mic" and getattr(sentence, "confidence", 1.0) < MIC_MIN_CONFIDENCE:
+                        log.info(
+                            "dropped an unclear microphone line (confidence %.2f, %d words)",
+                            sentence.confidence, len(sentence.split()),
+                        )
+                        continue
                     emit(source, sentence)
                 if text.partial != shown_partial[source]:
                     shown_partial[source] = text.partial

@@ -170,3 +170,21 @@ def test_the_brief_material_lists_meetings_and_the_last_message_of_each_thread(s
     assert "Support terms" in text and "Re: Rehearsal date" in text
     assert text.count("Rehearsal date") == 1  # only the thread's last message
     assert "THE USER SENT THIS LAST MESSAGE" in text
+
+
+# --- how sure the recogniser was ---------------------------------------------------
+
+
+def test_a_sentence_carries_the_recognisers_confidence():
+    from types import SimpleNamespace
+
+    from jarvis.listen import Heard, WindowText
+
+    def token(text, confidence):
+        return SimpleNamespace(text=text, confidence=confidence)
+
+    sure = WindowText._join([token(" Good", 0.98), token(" morning.", 0.94)])
+    unsure = WindowText._join([token(" Spin", 0.41), token(" a", 0.5), token(" cutlery.", 0.38)])
+    assert sure == "Good morning." and isinstance(sure, Heard) and sure.confidence > 0.9
+    assert unsure.confidence < 0.6
+    assert WindowText._join([]).confidence == 1.0
