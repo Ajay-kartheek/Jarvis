@@ -122,3 +122,15 @@ def test_invalid_config_is_rejected(mutate, message):
 
     with pytest.raises(ConfigError, match=message):
         parse_config(raw)
+
+
+def test_optional_jobs_may_be_routed_or_left_to_their_fallback():
+    import tomllib
+    from pathlib import Path
+
+    from jarvis.config import parse_config
+
+    raw = tomllib.loads((Path(__file__).resolve().parent.parent / "config.example.toml").read_text())
+    assert "core" not in parse_config(raw).jobs  # not set: Jarvis's conversation uses the "ask" route
+    raw["models"]["jobs"]["core"] = {"model": "claude-opus-5-5"}
+    assert parse_config(raw).jobs["core"].model == "claude-opus-5-5"

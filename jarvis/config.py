@@ -28,6 +28,13 @@ JOBS = (
 )
 
 
+# Jobs that may be routed but need not be: each falls back to another job's model.
+OPTIONAL_JOBS = {
+    "core": "ask",  # Jarvis's own conversation
+    "prep": "briefs",  # preparing for a meeting
+}
+
+
 class ConfigError(ValueError):
     """config.toml is missing something or holds an invalid value."""
 
@@ -156,14 +163,14 @@ def _parse_projects(items: list) -> tuple[Project, ...]:
 
 
 def _parse_jobs(items: dict, default_backend: str) -> dict[str, JobRoute]:
-    unknown = sorted(set(items) - set(JOBS))
+    unknown = sorted(set(items) - set(JOBS) - set(OPTIONAL_JOBS))
     if unknown:
         raise ConfigError(f"models.jobs: unknown job(s) {', '.join(unknown)}")
     missing = [job for job in JOBS if job not in items]
     if missing:
         raise ConfigError(f"models.jobs: missing route(s) for {', '.join(missing)}")
     jobs = {}
-    for job in JOBS:
+    for job in (*JOBS, *(job for job in OPTIONAL_JOBS if job in items)):
         entry = items[job]
         model = str(entry.get("model", "")).strip()
         if not model:

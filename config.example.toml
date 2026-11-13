@@ -55,3 +55,11 @@ model = "claude-sonnet-5-5"
 
 [models.jobs.web]
 model = "claude-sonnet-5-5"
+
+# Optional. Leave these out and Jarvis's own conversation uses the "ask" model
+# and meeting preparation uses the "briefs" model.
+# [models.jobs.core]
+# model = "claude-sonnet-5-5"
+#
+# [models.jobs.prep]
+# model = "claude-sonnet-5-5"
