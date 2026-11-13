@@ -167,7 +167,9 @@ class Autopilot:
 
     A call that starts while automatic listening is on starts a meeting; the
     end of that call stops it. If the user stops a meeting by hand, it stays
-    stopped until the next call.
+    stopped until the next call. A meeting the user started by hand belongs to
+    the call too if it is running when the call begins or was started during
+    it; one started with no call around is left for the user to stop.
     """
 
     RETRY_SECONDS = 30
@@ -182,7 +184,7 @@ class Autopilot:
         self.headphones = False
         self.permissions: dict[str, str] = {}
         self.last_report = 0.0
-        self._mine = False  # the running meeting was started here
+        self._mine = False  # the running meeting belongs to the current call
         self._dismissed = False  # the user stopped it during this call
         self._attempts = 0
         self._last_attempt = 0.0
@@ -207,7 +209,7 @@ class Autopilot:
 
     def user_started(self) -> None:
         self._dismissed = False
-        self._mine = False
+        self._mine = self.call_active
 
     def _blocked(self) -> str | None:
         denied = [name for name in ("microphone", "system_audio") if self.permissions.get(name) == "denied"]
@@ -237,6 +239,7 @@ class Autopilot:
         if began:
             self._dismissed = False
             self._attempts = 0
+            self._mine = meetings.running  # already listening: this call takes it over
             log.info("call started in %s", app)
         if ended:
             log.info("call ended")

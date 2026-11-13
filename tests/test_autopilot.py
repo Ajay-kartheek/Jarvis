@@ -79,13 +79,34 @@ def test_stopping_by_hand_holds_until_the_next_call():
     assert len(runtime.meeting.starts) == 2
 
 
-def test_a_meeting_started_by_hand_is_not_stopped_by_the_end_of_a_call():
+def test_a_meeting_started_by_hand_with_no_call_is_left_alone():
     autopilot, runtime = pilot()
-    runtime.meeting.running = True  # the user pressed Start before any call
+    runtime.meeting.running = True  # the user pressed Start: a conversation in the room, say
     autopilot.user_started()
-    report(autopilot, True)
+    report(autopilot, False)
     report(autopilot, False)
     assert runtime.meeting.starts == [] and runtime.meeting.stops == 0
+
+
+def test_a_call_takes_over_a_meeting_started_by_hand():
+    autopilot, runtime = pilot()
+    runtime.meeting.running = True  # pressed Start just before joining
+    autopilot.user_started()
+    report(autopilot, True)
+    assert runtime.meeting.starts == []  # no second start
+    report(autopilot, False)
+    assert runtime.meeting.stops == 1
+
+
+def test_a_meeting_restarted_by_hand_during_a_call_ends_with_it():
+    autopilot, runtime = pilot()
+    report(autopilot, True)
+    autopilot.user_stopped()
+    runtime.meeting.running = False
+    runtime.meeting.running = True  # pressed Start again in the same call
+    autopilot.user_started()
+    report(autopilot, False)
+    assert runtime.meeting.stops == 1
 
 
 def test_nothing_starts_while_automatic_listening_is_off():
