@@ -97,10 +97,10 @@ class MeetingController:
             else:  # the engagement became clear during the call
                 self.meeting = {**self.meeting, "engagement": event["engagement"]}
                 self.runtime.publish_state()
-            if self._out is not None:
-                write_meta(self._out, self.meeting)
                 if event["engagement"]:
                     self.runtime.hub.publish({"type": "info", "text": f"This call is about {event['engagement']}."})
+            if self._out is not None:
+                write_meta(self._out, self.meeting)
             return
         if kind == "ready":
             self._set("listening")

@@ -101,6 +101,30 @@ def test_notices_raise_attention_once(client):
     assert client.get("/api/state").json()["notices"] == []
 
 
+def test_the_engagement_is_announced_only_when_it_becomes_clear_mid_call(client):
+    runtime = client.runtime
+    queue = runtime.hub.join()
+
+    def infos() -> list[str]:
+        found = []
+        while not queue.empty():
+            event = queue.get_nowait()
+            if event["type"] == "info":
+                found.append(event["text"])
+        return found
+
+    runtime.meeting._on_event({"type": "meeting", "title": "Atlas weekly", "engagement": "Atlas", "brief_chars": 10})
+    assert infos() == []  # known from the calendar: nothing to announce
+    assert runtime.meeting.meeting["engagement"] == "Atlas"
+
+    runtime.meeting.meeting = None
+    runtime.meeting._on_event({"type": "meeting", "title": "Unscheduled call", "engagement": None, "brief_chars": 10})
+    started = runtime.meeting.meeting["started_at"]
+    runtime.meeting._on_event({"type": "meeting", "title": "Unscheduled call", "engagement": "Borealis", "brief_chars": 10})
+    assert infos() == ["This call is about Borealis."]
+    assert runtime.meeting.meeting == {"title": "Unscheduled call", "engagement": "Borealis", "started_at": started}
+
+
 # --- set-up files -----------------------------------------------------------------
 
 
