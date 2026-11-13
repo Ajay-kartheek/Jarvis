@@ -354,8 +354,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
   // MARK: Actions
 
   /// Pressing the shortcut while the panel has the keyboard hides it; otherwise it brings it up.
+  // A plain toggle: the shortcut always closes a panel that is on screen, whether or not it has the keyboard.
   private func togglePanel(reason: String) {
-    if panel.isVisible && panel.isKey {
+    if panel.isVisible {
       panel.hide()
     } else {
       panel.show(reason: reason, activate: true)

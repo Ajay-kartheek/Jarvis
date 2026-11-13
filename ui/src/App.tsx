@@ -23,6 +23,9 @@ const BOOT_MS = 1600; // frames draw in slowly during this window, briskly after
 const QUERY = new URLSearchParams(location.search);
 const PANEL = QUERY.get("panel") === "1"; // inside the Jarvis app's floating panel
 const FIRST: Mode = MODES.find((name) => name === QUERY.get("tab")) ?? "meeting"; // ?tab=today opens there
+
+/** Asks the Jarvis app to put its panel away. Control+Option+J brings it back. */
+const hidePanel = () => window.webkit?.messageHandlers?.jarvis?.postMessage({ action: "hide" });
 const TOAST_MS = 6000;
 
 export default function App() {
@@ -78,7 +81,9 @@ export default function App() {
         event.preventDefault();
         suggest();
       } else if (event.key === "Escape") {
-        target?.blur();
+        // In a text box Escape leaves the box; anywhere else it closes the panel.
+        if (target?.matches(TYPING)) target.blur();
+        else if (PANEL) hidePanel();
       } else if (!modifier && !event.altKey && !target?.matches(TYPING)) {
         const next = MODES[Number(event.key) - 1];
         if (!next) return;
@@ -122,6 +127,11 @@ export default function App() {
           <span className="link" data-link={jarvis.link}>
             {LINK_LABEL[jarvis.link]}
           </span>
+          {PANEL && (
+            <button className="link close" onClick={hidePanel} title="Close. Control+Option+J brings Jarvis back." aria-label="Close">
+              ✕
+            </button>
+          )}
         </header>
 
         <Notices notices={model.app.notices} onReconnect={jarvis.reconnect} />

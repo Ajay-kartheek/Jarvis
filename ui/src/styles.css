@@ -128,7 +128,9 @@ body::after {
 
 .link { padding: 1px 6px; border: 1px solid; color: var(--dim); font-size: 10px; line-height: 16px; letter-spacing: 0.14em; }
 .link[data-link="live"] { color: var(--cyan); }
-.link.auto { background: none; font-family: inherit; cursor: pointer; }
+.link.auto, .link.close { background: none; font-family: inherit; cursor: pointer; }
+.link.close { color: var(--text); letter-spacing: 0; }
+.link.close:hover { color: var(--amber); }
 .link.auto[data-on] { color: var(--cyan); box-shadow: var(--glow); }
 .notices { display: grid; gap: 6px; }
 .notice {
