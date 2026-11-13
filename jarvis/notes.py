@@ -131,6 +131,34 @@ async def write(config: Config, transcript: Path, meeting: dict | None) -> Note 
     return Note(title, engagement, at, path, body.strip())
 
 
+def correct_latest(*, title: str | None = None, engagement: str | None = None, discard: bool = False) -> str | None:
+    """Fix how the latest call was filed: another title or engagement, or drop its notes altogether.
+
+    Returns the title it was filed under, or None when there are no notes.
+    ``engagement`` "" means: it belongs to no engagement.
+    """
+    with open_store() as store:
+        found = store.artifacts("notes", limit=1)
+        if not found:
+            return None
+        note = found[0]
+        path = Path(note["path"]) if note["path"] else None
+        if discard:
+            store.artifact_delete(note["id"])
+            if path is not None:
+                store.note_delete(str(path))
+                path.unlink(missing_ok=True)
+            store.log("notes", f"Discarded the notes of {note['title']}")
+            return note["title"]
+        new_title = (title or note["title"]).strip()
+        project = note["project"] if engagement is None else (engagement or None)
+        store.artifact_change(note["id"], title=new_title, project=project)
+        if path is not None:
+            store.note_upsert(str(path), f"Meeting notes: {new_title}", note["body"], note["ts"], project)
+        store.log("notes", f"Refiled the notes of {note['title']} as {new_title}")
+        return note["title"]
+
+
 def recent(limit: int = 10) -> list[dict]:
     with open_store() as store:
         found = store.notes(limit=limit)

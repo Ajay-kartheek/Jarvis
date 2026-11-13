@@ -183,6 +183,15 @@ CREATE TABLE IF NOT EXISTS activity (
     text TEXT NOT NULL
 );
 
+-- Things the user asked to be reminded of. Jarvis speaks and shows them when due.
+CREATE TABLE IF NOT EXISTS reminders (
+    id      INTEGER PRIMARY KEY,
+    due_ts  INTEGER NOT NULL,
+    text    TEXT NOT NULL,
+    done    INTEGER NOT NULL DEFAULT 0,
+    ts      INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS docs (
     doc_id    INTEGER PRIMARY KEY,
     account   TEXT NOT NULL,
@@ -915,6 +924,30 @@ class Store:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    # --- reminders ---------------------------------------------------------------
+
+    def reminder_add(self, due_ts: int, text: str) -> int:
+        with self._tx():
+            cursor = self.db.execute(
+                "INSERT INTO reminders(due_ts, text, ts) VALUES (?,?,?)", (int(due_ts), text.strip(), int(time.time()))
+            )
+        return int(cursor.lastrowid)
+
+    def reminders(self, *, due_by: int | None = None) -> list[dict]:
+        """Reminders still to come, soonest first. With ``due_by``: only those due by then."""
+        where, args = "", []
+        if due_by is not None:
+            where = " AND due_ts <= ?"
+            args.append(int(due_by))
+        rows = self.db.execute(
+            f"SELECT id, due_ts, text FROM reminders WHERE done=0{where} ORDER BY due_ts, id", args
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reminder_done(self, reminder_id: int) -> bool:
+        with self._tx():
+            return self.db.execute("UPDATE reminders SET done=1 WHERE id=? AND done=0", (reminder_id,)).rowcount > 0
+
     # --- what Jarvis made and did ------------------------------------------------
 
     def artifact_add(self, kind: str, title: str, *, project: str | None = None, path: str | None = None,
@@ -947,6 +980,14 @@ class Store:
             [*args, limit],
         ).fetchall()
         return [{**dict(row), "meta": json.loads(row["meta"] or "{}")} for row in rows]
+
+    def artifact_change(self, artifact_id: int, *, title: str, project: str | None) -> None:
+        with self._tx():
+            self.db.execute("UPDATE artifacts SET title=?, project=? WHERE id=?", (title, project, artifact_id))
+
+    def artifact_delete(self, artifact_id: int) -> None:
+        with self._tx():
+            self.db.execute("DELETE FROM artifacts WHERE id=?", (artifact_id,))
 
     def artifact_counts(self) -> dict[str, int]:
         return {row[0]: row[1] for row in self.db.execute("SELECT kind, COUNT(*) FROM artifacts GROUP BY kind")}

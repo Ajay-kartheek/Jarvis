@@ -99,15 +99,36 @@ class Meeting:
 # --- which meeting, which engagement ----------------------------------------
 
 
+SKIPPED = "skipped_meetings"  # where the store keeps the meetings the user said are off
+
+
+def skip_key(title: str, start_ts: int) -> str:
+    return f"{int(start_ts)} {title}"
+
+
+def mark_skipped(store: Store, title: str, start_ts: int) -> None:
+    """Remember that the user said this meeting is not happening."""
+    store.set_state(LOCAL_ACCOUNT, SKIPPED, skip_key(title, start_ts), int(time.time()))
+
+
+def is_skipped(store: Store, title: str, start_ts: int) -> bool:
+    return store.get_state(LOCAL_ACCOUNT, SKIPPED, skip_key(title, start_ts)) is not None
+
+
 def current_event(store: Store, account: str, now: float) -> dict | None:
-    """The calendar event happening now, or starting within ten minutes."""
-    row = store.db.execute(
+    """The calendar event happening now, or starting within ten minutes.
+
+    A meeting the user said is off is passed over: a call in its slot is some
+    other call.
+    """
+    rows = store.db.execute(
         "SELECT summary, description, start_ts, end_ts, organizer, attendees FROM calendar_events "
         "WHERE account=? AND all_day=0 AND COALESCE(status, '') != 'cancelled' "
         "AND COALESCE(event_type, 'default') = 'default' "
-        "AND start_ts <= ? AND end_ts >= ? ORDER BY start_ts DESC LIMIT 1",
+        "AND start_ts <= ? AND end_ts >= ? ORDER BY start_ts DESC",
         (account, int(now) + 600, int(now)),
-    ).fetchone()
+    ).fetchall()
+    row = next((row for row in rows if not is_skipped(store, row["summary"], row["start_ts"])), None)
     if row is None:
         return None
     people = [
@@ -162,6 +183,7 @@ def agenda(store: Store, account: str, known: list[Project], start: int, end: in
             "end": datetime.fromtimestamp(row["end_ts"]).astimezone().isoformat(timespec="minutes"),
             "engagement": project.name if project else None,
             "people": [p for p in people if p][:12],
+            "skipped": is_skipped(store, row["summary"], row["start_ts"]),  # the user said it is off
             # Someone from another organisation is in it: a client or partner meeting.
             "outside": any(
                 "@" in person.get("email", "") and person["email"].rsplit("@", 1)[-1].lower() != home

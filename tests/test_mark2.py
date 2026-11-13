@@ -422,3 +422,59 @@ def test_todays_preparation_sheets_come_back_after_a_restart(client):
     assert [(card["kind"], card["title"], card["body"]) for card in cards] == [
         ("prep", "Preparation: Borealis review", "the sheet"),
     ]
+
+
+def test_a_reminder_is_said_and_shown_once_when_it_is_due(client):
+    runtime = client.runtime
+    now = datetime(2026, 1, 5, 18, 0).timestamp()
+    with open_store() as store:
+        store.reminder_add(int(now) - 30, "Go to the store")
+        later = store.reminder_add(int(now) + 3600, "Call Priya")
+        store.reminder_add(int(now) - 5 * 3600, "Send the checklist")  # the Mac was asleep then
+    runtime.settings["speak"] = False  # the voice needs a running service; what is said is checked as text
+    queue = runtime.hub.join()
+    assert runtime.remind_due(now) == 2
+    said = [event["text"] for event in _drain(queue) if event["type"] == "say"]
+    assert said[0] == "A reminder: Send the checklist (it was due at 13:00 on Monday)" and said[1] == "A reminder: Go to the store"
+    assert [card["title"] for card in client.get("/api/state").json()["cards"]] == ["Reminder", "Reminder"]
+    assert runtime.remind_due(now) == 0  # not twice
+    with open_store() as store:
+        assert [item["id"] for item in store.reminders()] == [later]
+        assert store.reminder_done(later) and not store.reminder_done(later)
+
+
+def test_a_meeting_the_user_called_off_does_not_name_a_call_in_its_slot(store):
+    now = datetime(2026, 1, 5, 15, 20).timestamp()
+    start = int(datetime(2026, 1, 5, 15, 0).timestamp())
+    store.calendar_upsert_events(ME, "primary", [
+        EventRecord(id="e1", summary="Atlas <> Client weekly", start_ts=start, end_ts=start + 1800,
+                    attendees=[{"name": "Priya", "email": "priya@client.example"}]),
+    ])
+    assert meeting.current_event(store, ME, now)["title"] == "Atlas <> Client weekly"
+    meeting.mark_skipped(store, "Atlas <> Client weekly", start)
+    assert meeting.current_event(store, ME, now) is None  # a call now is some other call
+    assert meeting.agenda(store, ME, [ATLAS], start - 60, start + 60)[0]["skipped"] is True
+
+
+def test_the_latest_call_can_be_refiled_or_discarded(fake_home):
+    from jarvis import notes
+
+    assert notes.correct_latest(title="x") is None
+    folder = fake_home / "notes"
+    folder.mkdir()
+    path = folder / "call.md"
+    path.write_text("notes")
+    with open_store() as store:
+        store.note_upsert(str(path), "Meeting notes: Atlas <> Client weekly", "We tested the microphone.", 1_700_000_000, "Atlas")
+        store.artifact_add("notes", "Atlas <> Client weekly", project="Atlas", path=str(path), body="We tested the microphone.", ts=1_700_000_000)
+
+    assert notes.correct_latest(title="Test call with a colleague", engagement="") == "Atlas <> Client weekly"
+    with open_store() as store:
+        assert store.notes("Atlas") == []  # no longer part of the engagement's record
+        assert [note.title for note in store.notes()] == ["Meeting notes: Test call with a colleague"]
+        assert store.artifacts("notes")[0]["project"] is None
+
+    assert notes.correct_latest(discard=True) == "Test call with a colleague"
+    with open_store() as store:
+        assert store.notes() == [] and store.artifacts("notes") == []
+    assert not path.exists()

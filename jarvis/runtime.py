@@ -49,6 +49,7 @@ AUTO_PREP_NEAREST = 12 * 60  # prepare for meetings that start between these two
 AUTO_PREP_FURTHEST = 50 * 60
 AUTO_PREP_PER_DAY = 3
 DEFAULT_SETTINGS = {"speak": True, "auto_prep": True}
+REMINDER_LATE_SECONDS = 15 * 60
 
 
 def now_iso() -> str:
@@ -456,18 +457,19 @@ class Runtime:
         entry = self._speech.get((speech_id, seq))
         return await entry[1] if entry else None
 
-    def say(self, text: str) -> None:
+    def say(self, text: str, *, aloud: bool = False) -> None:
         """Jarvis speaking up by himself: a task's questions, or that something is ready.
 
         Always shown. Spoken only if the user has been talking to Jarvis in the
-        last few minutes, so it never starts talking out of the blue.
+        last few minutes, so it never starts talking out of the blue; ``aloud``
+        is for what the user asked to be told at that moment, such as a reminder.
         """
         speech_id = self._next_id("s")
         at = now_iso()
         self.hub.publish({"type": "say", "id": speech_id, "text": text, "at": at})
         self.conversation.append({"role": "jarvis", "text": text, "at": at})
         in_conversation = time.monotonic() - self._spoke_at < SPEAK_UP_WITHIN_SECONDS
-        if in_conversation and self._may_speak():
+        if (aloud or in_conversation) and self._may_speak():
             from jarvis import speak
 
             for seq, sentence in enumerate(speak.sentences(text)):
@@ -657,6 +659,7 @@ class Runtime:
         while True:
             try:
                 self.auto_prepare()
+                self.remind_due()
                 if speech.unload_if_idle(MODEL_IDLE_SECONDS):
                     log.info("speech model released")
                 if self._sounded_at and time.monotonic() - self._sounded_at > MODEL_IDLE_SECONDS:
@@ -667,6 +670,23 @@ class Runtime:
             except Exception as exc:
                 log.warning("minute jobs failed: %s", exc)
             await asyncio.sleep(60)
+
+    def remind_due(self, now: float | None = None) -> int:
+        """Say and show the reminders whose time has come. Returns how many."""
+        now = now or time.time()
+        with open_store() as store:
+            due = store.reminders(due_by=int(now))
+            for item in due:
+                store.reminder_done(item["id"])
+        for item in due:
+            late = now - item["due_ts"] > REMINDER_LATE_SECONDS  # the Mac was asleep at the time
+            was = f" (it was due at {datetime.fromtimestamp(item['due_ts']):%H:%M on %A})" if late else ""
+            self.show_card({"id": f"r-{item['id']}", "kind": "note", "title": "Reminder", "body": item["text"] + was})
+            self.say(f"A reminder: {item['text']}{was}", aloud=True)
+            self.record("reminder", f"Reminded: {item['text'][:160]}")
+        if due:
+            self.call_attention()
+        return len(due)
 
     def auto_prepare(self, now: float | None = None) -> list:
         """Start preparing, unasked, for meetings with outside people that begin within the hour."""
@@ -691,7 +711,7 @@ class Runtime:
         started = []
         for meeting in upcoming:
             key = f"{day} {meeting['start']} {meeting['title']}"
-            if not (meeting["outside"] and meeting["engagement"]) or key in self._auto_prepared:
+            if not (meeting["outside"] and meeting["engagement"]) or meeting["skipped"] or key in self._auto_prepared:
                 continue
             self._auto_prepared.add(key)
             if meeting["start"] in made or self.tasks.for_meeting(meeting, meeting["engagement"]) is not None:
