@@ -478,3 +478,73 @@ def test_the_latest_call_can_be_refiled_or_discarded(fake_home):
     with open_store() as store:
         assert store.notes() == [] and store.artifacts("notes") == []
     assert not path.exists()
+
+
+# --- the one "yes" ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text, answer", [
+    ("yes", True), ("Yes.", True), ("yeah go ahead", None), ("Go ahead", True), ("send it", True),
+    ("Yes, please", True), ("okay Jarvis", True), ("no", False), ("No thanks", False), ("cancel it", False),
+    ("don't", False), ("yes but change the subject first", None), ("send it to Priya instead", None),
+    ("what does it say?", None), ("", None),
+])
+def test_only_a_plain_yes_or_no_counts_as_an_answer(text, answer):
+    from jarvis import approvals
+
+    assert approvals.plain_answer(text) is answer
+
+
+def test_an_approval_is_settled_by_a_click_or_by_a_plain_word_and_never_twice(client):
+    import time
+
+    runtime = client.runtime
+    runtime.settings["speak"] = False
+
+    async def scenario():
+        asking = asyncio.create_task(runtime.approvals.ask("send_mail", "d1", "Send the reply to Priya", "To: priya@example.com"))
+        await asyncio.sleep(0)
+        first = runtime.approvals.open()[0]
+        assert [card["kind"] for card in runtime.cards] == ["approval"]
+        assert runtime.approvals.words("what does it say?", spoken=False) is None  # not an answer: stays open
+        assert runtime.approvals.click(first.id, True) and not runtime.approvals.click(first.id, True)
+        granted = await asking
+        assert granted.granted is True and granted.by == "click"
+        assert granted.allows("send_mail", "d1") and not granted.allows("send_mail", "d2") and not granted.allows("run", "d1")
+        assert runtime.cards == []
+
+        asking = asyncio.create_task(runtime.approvals.ask("run", "git push", "Run a command", "git push"))
+        await asyncio.sleep(0)
+        open_now = runtime.approvals.open()[0]
+        open_now.asked_at = time.monotonic() - 600  # asked ten minutes ago
+        assert runtime.approvals.words("yes", spoken=True) is None  # a spoken yes that late takes a click
+        declined = runtime.approvals.words("no", spoken=False)
+        assert declined is not None and (await asking).granted is False
+
+        quick = await runtime.approvals.ask("run", "x", "Run", "x", wait=0.01)
+        assert quick.granted is False and quick.by == "timeout"  # no answer is a no
+
+    asyncio.run(scenario())
+
+
+def test_a_plain_yes_goes_to_the_open_question_and_not_to_the_model(client):
+    runtime = client.runtime
+    runtime.settings["speak"] = False
+    seen = []
+
+    async def reply(text, **kw):
+        seen.append(text)
+        return Answer("model reply", [], 0.1)
+
+    runtime.core.talk = reply
+
+    async def scenario():
+        asking = asyncio.create_task(runtime.approvals.ask("send_mail", "d1", "Send the reply to Priya", "body"))
+        await asyncio.sleep(0)
+        answer = await runtime.talk("yes send it", spoken=False)
+        assert answer["text"] == "Going ahead." and seen == []
+        assert (await asking).granted is True
+        assert (await runtime.talk("yes", spoken=False))["text"] == "model reply"  # nothing open: an ordinary message
+
+    asyncio.run(scenario())
+    assert client.post("/api/approvals/a99", json={"approve": True}).status_code == 409

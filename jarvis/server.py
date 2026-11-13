@@ -48,6 +48,10 @@ class AnswerRequest(BaseModel):
     text: str
 
 
+class ApprovalRequest(BaseModel):
+    approve: bool
+
+
 class SettingsRequest(BaseModel):
     auto: bool | None = None
     speak: bool | None = None
@@ -219,6 +223,12 @@ def create_app(config: Config, *, background: bool = False) -> FastAPI:
     async def stop_task(task_id: str) -> dict:
         if not runtime.tasks.stop(task_id):
             raise HTTPException(409, "That task is not running.")
+        return {"ok": True}
+
+    @app.post("/api/approvals/{approval_id}")
+    async def settle_approval(approval_id: str, body: ApprovalRequest) -> dict:
+        if not runtime.approvals.click(approval_id, body.approve):
+            raise HTTPException(409, "That question is no longer open.")
         return {"ok": True}
 
     @app.post("/api/cards/{card_id}/dismiss")

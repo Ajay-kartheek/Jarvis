@@ -274,6 +274,7 @@ class Autopilot:
 
 class Runtime:
     def __init__(self, config: Config) -> None:
+        from jarvis.approvals import Approvals
         from jarvis.core import Core
         from jarvis.tasks import Tasks
 
@@ -282,6 +283,7 @@ class Runtime:
         self.meeting = MeetingController(self)
         self.autopilot = Autopilot(self)
         self.tasks = Tasks(self)
+        self.approvals = Approvals(self)
         self.core = Core(config, self)
         self.attention = 0
         self.notices: dict[str, str] = {}
@@ -333,6 +335,7 @@ class Runtime:
             "syncing": self._syncing,
             "busy": self.core.busy,
             "tasks": [task.summary() for task in self.tasks.recent()],
+            "approvals": [approval.summary() for approval in self.approvals.open()],
             "cards": list(self.cards),
             "conversation": list(self.conversation),
             "settings": {**self.settings, "auto": self.autopilot.enabled},
@@ -490,6 +493,16 @@ class Runtime:
         self.hub.publish({"type": "turn", "id": turn_id, "text": text, "spoken": spoken, "at": at})
         self.conversation.append({"role": "user", "text": text, "at": at})
 
+        # A plain yes or no to an open question is the user's answer to it. It never reaches a model.
+        settled = self.approvals.words(text, spoken)
+        if settled is not None:
+            said = "Going ahead." if settled.granted else "Cancelled."
+            reply = {"id": turn_id, "text": said, "speak": False, "seconds": 0.0, "at": now_iso()}
+            self.hub.publish({"type": "reply", **reply})
+            self.conversation.append({"role": "jarvis", "text": said, "at": reply["at"]})
+            self.publish_state()
+            return {**reply, "web_queries": [], "drafts": []}
+
         def on_text(so_far: str) -> None:
             self.hub.publish({"type": "reply_delta", "id": turn_id, "text": so_far})
             if speaker:
@@ -563,6 +576,7 @@ class Runtime:
 
     async def shutdown(self) -> None:
         self._closing = True
+        self.approvals.cancel_all()
         for task in list(self._tasks):
             task.cancel()
         await self.meeting.stop()
