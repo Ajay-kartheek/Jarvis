@@ -29,7 +29,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage,
 from jarvis import projects as project_registry
 from jarvis.config import Config
 from jarvis.projects import Project
-from jarvis.store import LOCAL_ACCOUNT, NOTE_PREFIX, Store, open_store
+from jarvis.store import LOCAL_ACCOUNT, NOTE_PREFIX, PREP_PREFIX, Store, open_store
 from jarvis.timeutil import day, minute
 
 BRIEF_CHARS = 48_000
@@ -41,6 +41,8 @@ EXCERPT_CHARS = 500
 TRANSCRIPT_TAIL = 10
 TURNS_BEFORE_RESET = 50
 PREVIOUS_NOTES = 2
+PREP_FRESH_SECONDS = 18 * 3600  # a preparation sheet counts for meetings later the same day
+PREP_CHARS = 6_000
 NOTE_CHARS = 2_500
 REBIND_ATTEMPTS = 2
 NOTHING = "NONE"
@@ -145,13 +147,14 @@ def agenda(store: Store, account: str, known: list[Project], start: int, end: in
         "ORDER BY start_ts",
         (account, start, end),
     ).fetchall()
+    home = account.rsplit("@", 1)[-1].lower()
     meetings = []
     for row in rows:
-        people = [
-            person.get("name") or person.get("email", "")
-            for person in json.loads(row["attendees"] or "[]")
+        others = [
+            person for person in json.loads(row["attendees"] or "[]")
             if not person.get("resource") and not person.get("self")
         ]
+        people = [person.get("name") or person.get("email", "") for person in others]
         project = guess_project(known, {"title": row["summary"], "people": people})
         meetings.append({
             "title": row["summary"],
@@ -159,8 +162,46 @@ def agenda(store: Store, account: str, known: list[Project], start: int, end: in
             "end": datetime.fromtimestamp(row["end_ts"]).astimezone().isoformat(timespec="minutes"),
             "engagement": project.name if project else None,
             "people": [p for p in people if p][:12],
+            # Someone from another organisation is in it: a client or partner meeting.
+            "outside": any(
+                "@" in person.get("email", "") and person["email"].rsplit("@", 1)[-1].lower() != home
+                for person in others
+            ),
         })
     return meetings
+
+
+def find_meeting(store: Store, account: str, known: list[Project], *, engagement: str | None = None,
+                 title: str | None = None, when: float | None = None, now: float | None = None) -> dict | None:
+    """The calendar entry someone most likely means by "my Atlas call today".
+
+    Looks around ``when`` if a time was named, otherwise from half an hour ago
+    to a day and a half ahead, and prefers a matching engagement, then words
+    from the title, then the earliest.
+    """
+    now = now or time.time()
+    if when is not None:
+        start, end = when - 3 * 3600, when + 3 * 3600
+    else:
+        start, end = now - 1800, now + 36 * 3600
+    candidates = agenda(store, account, known, int(start), int(end))
+    wanted = (engagement or "").strip().lower()
+    words = set(keywords(title or "", limit=12))
+
+    def score(entry: dict) -> tuple:
+        name = (entry["engagement"] or "").lower()
+        text = entry["title"].lower()
+        fits = bool(wanted) and (name == wanted or re.search(rf"(?<!\w){re.escape(wanted)}(?!\w)", text) is not None)
+        shared = sum(1 for word in words if word in text)
+        return (fits, shared)
+
+    ranked = [(score(entry), entry) for entry in candidates]
+    if wanted or words:
+        ranked = [pair for pair in ranked if pair[0][0] or pair[0][1] > 0]
+    if not ranked:
+        return None
+    best = max(pair[0] for pair in ranked)
+    return next(entry for value, entry in ranked if value == best)  # candidates come earliest first
 
 
 def spot_project(known: list[Project], said: str) -> Project | None:
@@ -193,8 +234,8 @@ def _key_documents(store: Store, project: Project) -> list[tuple[str, str]]:
     scored = []
     for row in store.db.execute(
         "SELECT title, body, ts FROM docs WHERE account=? AND project=? AND LENGTH(body) > 200 "
-        "AND source_id NOT LIKE ?",
-        (LOCAL_ACCOUNT, project.name, f"{NOTE_PREFIX}%"),
+        "AND source_id NOT LIKE ? AND source_id NOT LIKE ?",
+        (LOCAL_ACCOUNT, project.name, f"{NOTE_PREFIX}%", f"{PREP_PREFIX}%"),
     ):
         title = row["title"]
         name = title.rsplit("/", 1)[-1]
@@ -228,6 +269,15 @@ def build_brief(store: Store, project: Project | None, event: dict | None, now: 
         return "\n\n".join(parts)
 
     parts.append(f"ENGAGEMENT: {project.name}. People named so far: {', '.join(project.people) or 'none'}.")
+    prepared = store.artifacts("prep", project=project.name, since=int(now) - PREP_FRESH_SECONDS, limit=1)
+    if prepared:
+        parts.append(
+            "PREPARATION FOR THIS MEETING (worked out with the user beforehand; prefer it over older material)\n"
+            + prepared[0]["body"][:PREP_CHARS]
+        )
+    told = store.facts(project.name, limit=30)
+    if told:
+        parts.append("WHAT THE USER HAS TOLD JARVIS (trust these)\n" + "\n".join(f"- {fact['text']}" for fact in told))
     mail = store.search(
         "", kind="mail", project=project.name, after=int(now) - RECENT_MAIL_DAYS * 86_400,
         order="newest", limit=20,

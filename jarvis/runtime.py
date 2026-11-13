@@ -3,7 +3,7 @@
 - the meeting in progress, if any;
 - the autopilot, which starts and stops listening from what the Jarvis app
   reports about calls, so nobody has to press Start;
-- the assistant behind the Ask box;
+- Jarvis himself (the conversation) and the tasks he runs in the background;
 - background jobs: keeping the local copy fresh, the morning brief, meeting
   notes after a call, and clearing old transcripts.
 
@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import time
+from collections import deque
 from collections.abc import Coroutine
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +26,7 @@ from pathlib import Path
 from jarvis import paths
 from jarvis import projects as project_registry
 from jarvis.config import Config
-from jarvis.store import open_store
+from jarvis.store import LOCAL_ACCOUNT, open_store
 
 log = logging.getLogger("jarvis")
 
@@ -38,6 +39,15 @@ APP_SILENT_AFTER_SECONDS = 10
 ENGAGEMENTS_CACHE_SECONDS = 30
 TEST_WAV_ENV = "JARVIS_TEST_WAV"  # replay a recording as the call, for tests
 RECOVER_NOTES_WITHIN_SECONDS = 86_400
+CARDS_KEPT = 12
+CONVERSATION_KEPT = 10
+SPEECH_KEPT_SECONDS = 180
+SPEAK_UP_WITHIN_SECONDS = 15 * 60  # Jarvis speaks up unasked only this long after the user last spoke to him
+MODEL_IDLE_SECONDS = 600
+AUTO_PREP_NEAREST = 12 * 60  # prepare for meetings that start between these two, in seconds from now
+AUTO_PREP_FURTHEST = 50 * 60
+AUTO_PREP_PER_DAY = 3
+DEFAULT_SETTINGS = {"speak": True, "auto_prep": True}
 
 
 def now_iso() -> str:
@@ -262,15 +272,20 @@ class Autopilot:
 
 class Runtime:
     def __init__(self, config: Config) -> None:
-        from jarvis.assistant import Assistant
+        from jarvis.core import Core
+        from jarvis.tasks import Tasks
 
         self.config = config
         self.hub = Hub()
         self.meeting = MeetingController(self)
         self.autopilot = Autopilot(self)
-        self.assistant = Assistant(config)
+        self.tasks = Tasks(self)
+        self.core = Core(config, self)
         self.attention = 0
         self.notices: dict[str, str] = {}
+        self.cards: list[dict] = []  # newest first
+        self.conversation: deque = deque(maxlen=CONVERSATION_KEPT)
+        self.settings = dict(DEFAULT_SETTINGS)
         self.last_sync: str | None = None
         self.brief: dict | None = None
         self._syncing = False
@@ -280,6 +295,13 @@ class Runtime:
         self._closing = False
         self._engagements: tuple[float, list[dict]] = (0.0, [])
         self._purged_on = ""
+        self._ids = 0
+        self._speech: dict[tuple[str, int], tuple[float, asyncio.Task]] = {}
+        self._spoke_at = 0.0  # when the user last spoke to Jarvis, and when Jarvis last made a sound
+        self._sounded_at = 0.0
+        self._folders_due = False
+        self._auto_prepared: set[str] = set()
+        self._load_settings()
 
     # --- what the interface sees -------------------------------------------
 
@@ -307,6 +329,15 @@ class Runtime:
             "attention": self.attention,
             "last_sync": self.last_sync,
             "syncing": self._syncing,
+            "busy": self.core.busy,
+            "tasks": [task.summary() for task in self.tasks.recent()],
+            "cards": list(self.cards),
+            "conversation": list(self.conversation),
+            "settings": {**self.settings, "auto": self.autopilot.enabled},
+            "voice": {
+                "hear": self.autopilot.app_connected and self.autopilot.permissions.get("microphone") == "granted",
+                "speak": _speak_engine() is not None,
+            },
         }
 
     def pulse(self) -> dict:
@@ -331,6 +362,155 @@ class Runtime:
         if self.notices.pop(key, None) is not None:
             self.publish_state()
 
+    def _next_id(self, prefix: str) -> str:
+        self._ids += 1
+        return f"{prefix}{self._ids}"
+
+    # --- cards, activity, settings ---------------------------------------------
+
+    def show_card(self, card: dict) -> dict:
+        """Add a card under the orb, or replace the one with the same id."""
+        card = {"id": card.get("id") or self._next_id("c"), "at": now_iso(), "body": "", **card}
+        self.cards = [card, *(old for old in self.cards if old["id"] != card["id"])][:CARDS_KEPT]
+        self.hub.publish({"type": "card", "card": card})
+        return card
+
+    def drop_card(self, card_id: str) -> bool:
+        kept = [card for card in self.cards if card["id"] != card_id]
+        if len(kept) == len(self.cards):
+            return False
+        self.cards = kept
+        self.hub.publish({"type": "card_gone", "id": card_id})
+        return True
+
+    def record(self, kind: str, text: str) -> None:
+        """One line in the activity log the dashboard shows."""
+        try:
+            with open_store() as store:
+                store.log(kind, text)
+        except Exception as exc:  # the log must never break what was being done
+            log.warning("activity log failed: %s", exc)
+
+    def note(self, text: str) -> None:
+        """Tell Jarvis something he should know by the user's next message."""
+        self.core.note(text)
+
+    def _load_settings(self) -> None:
+        with open_store() as store:
+            for key, default in DEFAULT_SETTINGS.items():
+                saved = store.get_state(LOCAL_ACCOUNT, "settings", key)
+                self.settings[key] = default if saved is None else saved == "1"
+            auto = store.get_state(LOCAL_ACCOUNT, "settings", "auto")
+        self.autopilot.enabled = auto != "0"
+
+    def change_settings(self, changes: dict) -> dict:
+        with open_store() as store:
+            for key, value in changes.items():
+                if value is None or key not in (*DEFAULT_SETTINGS, "auto"):
+                    continue
+                if key == "auto":
+                    self.autopilot.enabled = bool(value)
+                else:
+                    self.settings[key] = bool(value)
+                store.set_state(LOCAL_ACCOUNT, "settings", key, "1" if value else "0")
+        self.publish_state()
+        return {**self.settings, "auto": self.autopilot.enabled}
+
+    # --- talking -----------------------------------------------------------------
+
+    def _may_speak(self) -> bool:
+        """Jarvis only makes a sound when nobody else could hear it on a call."""
+        return (
+            self.settings["speak"] and not self.meeting.running and not self.autopilot.call_active
+            and _speak_engine() is not None
+        )
+
+    def _speak(self, speech_id: str, seq: int, sentence: str) -> bool:
+        """Start turning one sentence into sound and tell the interface where to fetch it."""
+        from jarvis import speak
+
+        text = speak.speakable(sentence)
+        if not text:
+            return False
+        now = time.monotonic()
+        for key in [key for key, (made, _) in self._speech.items() if now - made > SPEECH_KEPT_SECONDS]:
+            del self._speech[key]
+        self._speech[(speech_id, seq)] = (now, asyncio.create_task(asyncio.to_thread(speak.synthesize, text)))
+        self._sounded_at = now
+        self.hub.publish({
+            "type": "speech", "id": speech_id, "seq": seq, "text": text, "url": f"/api/speech/{speech_id}/{seq}",
+        })
+        return True
+
+    async def speech_audio(self, speech_id: str, seq: int) -> bytes | None:
+        entry = self._speech.get((speech_id, seq))
+        return await entry[1] if entry else None
+
+    def say(self, text: str) -> None:
+        """Jarvis speaking up by himself: a task's questions, or that something is ready.
+
+        Always shown. Spoken only if the user has been talking to Jarvis in the
+        last few minutes, so it never starts talking out of the blue.
+        """
+        speech_id = self._next_id("s")
+        at = now_iso()
+        self.hub.publish({"type": "say", "id": speech_id, "text": text, "at": at})
+        self.conversation.append({"role": "jarvis", "text": text, "at": at})
+        in_conversation = time.monotonic() - self._spoke_at < SPEAK_UP_WITHIN_SECONDS
+        if in_conversation and self._may_speak():
+            from jarvis import speak
+
+            for seq, sentence in enumerate(speak.sentences(text)):
+                self._speak(speech_id, seq, sentence)
+        self.publish_state()
+
+    async def talk(self, text: str, *, spoken: bool = False, turn_id: str | None = None) -> dict:
+        """One message from the user and Jarvis's reply. Raises AgentError if no reply could be made."""
+        from jarvis.agents import AgentError
+
+        turn_id = turn_id or self._next_id("t")
+        started = time.monotonic()
+        if spoken:
+            self._spoke_at = started
+        aloud = spoken and self._may_speak()
+        speaker = _Speaker(self, turn_id) if aloud else None
+        at = now_iso()
+        self.hub.publish({"type": "turn", "id": turn_id, "text": text, "spoken": spoken, "at": at})
+        self.conversation.append({"role": "user", "text": text, "at": at})
+
+        def on_text(so_far: str) -> None:
+            self.hub.publish({"type": "reply_delta", "id": turn_id, "text": so_far})
+            if speaker:
+                speaker.feed(so_far)
+
+        working = self.spawn(self._show_busy())
+        try:
+            answer = await self.core.talk(
+                text, spoken=spoken, on_text=on_text,
+                on_step=lambda step: self.hub.publish({"type": "step", "id": turn_id, "text": step[:160]}),
+            )
+        except AgentError as exc:
+            self.hub.publish({"type": "reply_error", "id": turn_id, "text": str(exc)})
+            raise
+        finally:
+            if working is not None:
+                working.cancel()
+            self.publish_state()
+        if speaker:
+            speaker.finish(answer.text)
+        reply = {
+            "id": turn_id, "text": answer.text, "speak": aloud,
+            "seconds": round(time.monotonic() - started, 1), "at": now_iso(),
+        }
+        self.hub.publish({"type": "reply", **reply})
+        self.conversation.append({"role": "jarvis", "text": answer.text, "at": reply["at"]})
+        self.publish_state()
+        return {**reply, "web_queries": answer.web_queries, "drafts": answer.drafts}
+
+    async def _show_busy(self) -> None:
+        await asyncio.sleep(0)  # by now the conversation's lock is taken
+        self.publish_state()
+
     # --- background work -----------------------------------------------------
 
     def spawn(self, work: Coroutine) -> asyncio.Task | None:
@@ -347,6 +527,7 @@ class Runtime:
         self.spawn(_warm_up())
         self.spawn(self._sync_loop())
         self.spawn(self._daily_loop())
+        self.spawn(self._minute_loop())
         self.spawn(self.recover_notes())
 
     async def shutdown(self) -> None:
@@ -354,7 +535,7 @@ class Runtime:
         for task in list(self._tasks):
             task.cancel()
         await self.meeting.stop()
-        await self.assistant.close()
+        await self.core.close()
         self.hub.close()
 
     async def _sync_loop(self) -> None:
@@ -363,13 +544,19 @@ class Runtime:
             due = time.monotonic() - self._synced_at >= SYNC_EVERY_SECONDS
             if due and not self.meeting.running:  # a call gets the machine to itself
                 await self.sync_now()
+            elif self._folders_due and not self.meeting.running:
+                await self.sync_now(only="folders")
             await asyncio.sleep(30)
 
-    async def sync_now(self, fresh_for: float = 0) -> list[dict]:
+    def folders_changed(self) -> None:
+        """Jarvis wrote into an engagement folder: read the folders again soon."""
+        self._folders_due = True
+
+    async def sync_now(self, fresh_for: float = 0, only: str | None = None) -> list[dict]:
         """Bring mail, calendar, Drive and project folders up to date.
 
         Waits for a sync already under way, and does nothing if one finished
-        within the last ``fresh_for`` seconds.
+        within the last ``fresh_for`` seconds. ``only`` limits it to one source.
         """
         from jarvis import sync as sync_module
 
@@ -377,15 +564,17 @@ class Runtime:
             if fresh_for and time.monotonic() - self._synced_at < fresh_for:
                 return []
             self._syncing = True
+            self._folders_due = False
             self.publish_state()
             try:
-                results = await asyncio.to_thread(sync_module.run_sync, self.config, progress=log.info)
+                results = await asyncio.to_thread(sync_module.run_sync, self.config, only=only, progress=log.info)
             except Exception as exc:
                 log.warning("sync failed: %s", exc)
                 return []
             finally:
                 self._syncing = False
-                self._synced_at = time.monotonic()
+                if only is None:
+                    self._synced_at = time.monotonic()
         return self._after_sync(results)
 
     def _after_sync(self, results: list[dict]) -> list[dict]:
@@ -402,6 +591,9 @@ class Runtime:
             )
         elif any(r["status"] == "ok" for r in results if r["source"] in sync_module.SOURCES):
             self.clear("signin")
+        news = _sync_news(results)
+        if news:
+            self.record("sync", news)
         self.last_sync = now_iso()
         self._engagements = (0.0, [])
         self.publish_state()
@@ -419,6 +611,58 @@ class Runtime:
         self.clear("signin")
         self.spawn(self.sync_now())
         return actual
+
+    async def _minute_loop(self) -> None:
+        """Small regular jobs: prepare for meetings that are coming up, hand back memory nobody is using."""
+        from jarvis import speech
+
+        await asyncio.sleep(FIRST_SYNC_AFTER_SECONDS + 30)
+        while True:
+            try:
+                self.auto_prepare()
+                if speech.unload_if_idle(MODEL_IDLE_SECONDS):
+                    log.info("speech model released")
+                if self._sounded_at and time.monotonic() - self._sounded_at > MODEL_IDLE_SECONDS:
+                    from jarvis import speak
+
+                    self._sounded_at = 0.0
+                    speak.unload()
+            except Exception as exc:
+                log.warning("minute jobs failed: %s", exc)
+            await asyncio.sleep(60)
+
+    def auto_prepare(self, now: float | None = None) -> list:
+        """Start preparing, unasked, for meetings with outside people that begin within the hour."""
+        from jarvis import meeting as live
+
+        if not self.settings["auto_prep"] or self.meeting.running:
+            return []
+        now = now or time.time()
+        day = datetime.fromtimestamp(now).date().isoformat()
+        self._auto_prepared = {key for key in self._auto_prepared if key.startswith(day)}
+        if len(self._auto_prepared) >= AUTO_PREP_PER_DAY:
+            return []
+        with open_store() as store:
+            known = project_registry.load(store, self.config)
+            account = self.config.primary_account.email.lower()
+            upcoming = live.agenda(store, account, known, int(now + AUTO_PREP_NEAREST), int(now + AUTO_PREP_FURTHEST))
+            start_of_day = int(datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+            made = {
+                (item["meta"].get("meeting") or {}).get("start")
+                for item in store.artifacts("prep", since=start_of_day)
+            }
+        started = []
+        for meeting in upcoming:
+            key = f"{day} {meeting['start']} {meeting['title']}"
+            if not (meeting["outside"] and meeting["engagement"]) or key in self._auto_prepared:
+                continue
+            self._auto_prepared.add(key)
+            if meeting["start"] in made or self.tasks.for_meeting(meeting, meeting["engagement"]) is not None:
+                continue
+            if len(self._auto_prepared) > AUTO_PREP_PER_DAY:
+                break
+            started.append(self.tasks.start_prep(meeting, meeting["engagement"], auto=True))
+        return started
 
     async def _daily_loop(self) -> None:
         await asyncio.sleep(FIRST_SYNC_AFTER_SECONDS + 45)  # after the first sync has had a chance
@@ -449,6 +693,7 @@ class Runtime:
             if written is not None:
                 self.brief = written
                 self.hub.publish({"type": "brief", **written})
+                self.note("The morning brief for today was written; it is on the dashboard.")
                 self.call_attention()
 
     def load_brief(self) -> None:
@@ -477,6 +722,11 @@ class Runtime:
             return
         log.info("notes written: %s", note.path)
         self.hub.publish({"type": "notes", **note.summary()})
+        self.show_card({
+            "id": f"n-{transcript.stem}", "kind": "note", "title": f"Notes: {note.title}",
+            "body": note.text, "path": str(note.path),
+        })
+        self.note(f"The call \"{note.title}\" ended and its notes were written; they are on a card and saved.")
         self.call_attention()
 
     async def recover_notes(self) -> None:
@@ -488,6 +738,67 @@ class Runtime:
         for transcript in sorted(folder.glob("*.jsonl")):
             if transcript.stat().st_mtime >= cutoff and meta_path(transcript).exists():
                 await self.wrap_up(transcript)
+
+
+class _Speaker:
+    """Turns a reply into spoken sentences while it is still being written.
+
+    The reply arrives as "the whole text so far". When Jarvis says a line, uses
+    a tool and then starts a new line, the text starts over; what was said
+    before the tool is finished off first.
+    """
+
+    def __init__(self, runtime: Runtime, speech_id: str) -> None:
+        from jarvis import speak
+
+        self._runtime = runtime
+        self._id = speech_id
+        self._make = speak.SentenceStream
+        self._stream = self._make()
+        self._previous = ""
+        self._seq = 0
+
+    def _out(self, sentences: list[str]) -> None:
+        for sentence in sentences:
+            if self._runtime._speak(self._id, self._seq, sentence):
+                self._seq += 1
+
+    def feed(self, text: str) -> None:
+        if self._previous and not text.startswith(self._previous[: max(1, len(self._previous) // 2)]):
+            self._out(self._stream.finish(self._previous))
+            self._stream = self._make()
+        self._previous = text
+        self._out(self._stream.feed(text))
+
+    def finish(self, final: str) -> None:
+        self.feed(final)
+        self._out(self._stream.finish(final))
+
+
+def _speak_engine() -> str | None:
+    """The voice Jarvis can speak with on this Mac, or None."""
+    try:
+        from jarvis import speak
+    except ImportError:
+        return None
+    return speak.engine()
+
+
+def _sync_news(results: list[dict]) -> str:
+    """One line for the activity log when a sync brought something in, else ''."""
+    parts = []
+    for result in results:
+        summary = result.get("summary") or {}
+        if result["status"] != "ok" or result["source"] == "folders":
+            continue
+        changed = sum(
+            value for key, value in summary.items()
+            if isinstance(value, int) and not isinstance(value, bool)
+            and any(word in key for word in ("added", "changed", "updated", "fetched", "removed", "exported"))
+        )
+        if changed:
+            parts.append(f"{result['source']}: {changed} changes")
+    return "Synced " + ", ".join(parts) if parts else ""
 
 
 async def _warm_up() -> None:

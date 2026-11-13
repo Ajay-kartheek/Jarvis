@@ -341,15 +341,22 @@ def run(args) -> int:
     quiet turns off the printed lines and figures. echo_guard mutes the microphone
     while the other side is talking; it is True, False or a function returning either.
     """
+    from jarvis import speech
+
+    started_loading = time.perf_counter()
+    model = speech.acquire()  # shared with spoken questions; loaded and warmed up on first use
+    try:
+        return _listen(args, model, time.perf_counter() - started_loading)
+    finally:
+        speech.release()
+
+
+def _listen(args, model, load_seconds: float) -> int:
     on_sentence = getattr(args, "on_sentence", None)
     on_partial = getattr(args, "on_partial", None)
     on_level = getattr(args, "on_level", None)
     stop = getattr(args, "stop", None)
     quiet = getattr(args, "quiet", False)
-    started_loading = time.perf_counter()
-    model = load_model()
-    model.generate(get_logmel(mx.zeros(SAMPLE_RATE), model.preprocessor_config))  # warm up
-    load_seconds = time.perf_counter() - started_loading
 
     poll_seconds = 0.1
     sources = ["system"] if args.wav else ["system", "mic"]
@@ -437,8 +444,5 @@ def run(args) -> int:
         }
     if not quiet:
         print(json.dumps(stats, indent=2))
-    # A long-running service listens to many calls: hand the model's memory back between them.
-    del texts, model
-    mx.clear_cache()
     return 0
 

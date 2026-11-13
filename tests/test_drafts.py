@@ -5,7 +5,7 @@ import email
 
 import pytest
 
-from jarvis import assistant, drafts
+from jarvis import core, drafts
 from jarvis.config import load_config
 from jarvis.store import MailRecord, Store
 
@@ -82,28 +82,30 @@ def test_an_empty_draft_is_refused_before_any_network_call():
         drafts.save(draft, "   ")
 
 
-# --- the assistant's text helpers ------------------------------------------------
-
-
-@pytest.mark.parametrize("text, shown", [
-    ("", ""),
-    ("WEB", ""),  # may still turn out to be the marker
-    ("WEB-ONLY", ""),
-    ("web-only\n", ""),
-    ("We", ""),
-    ("Weekly status is fine", "Weekly status is fine"),
-    ("Go-live is 2 December.\n\nWEB:\n- fastapi release", "Go-live is 2 December."),
-    ("Answer\nWEB:", "Answer"),
-])
-def test_routing_markers_never_reach_the_screen(text, shown):
-    assert assistant.visible(text) == shown
+# --- Jarvis's own helpers ----------------------------------------------------------
 
 
 def test_only_the_users_words_open_the_draft_tool():
-    assert assistant.wants_draft("Draft a reply to Ravi saying Wednesday works")
-    assert assistant.wants_draft("write to Priya about the checklist")
-    assert not assistant.wants_draft("When is the rehearsal?")
+    assert core.wants_draft("Draft a reply to Ravi saying Wednesday works")
+    assert core.wants_draft("write to Priya about the checklist")
+    assert not core.wants_draft("When is the rehearsal?")
 
 
-def test_each_question_carries_the_time():
-    assert assistant.stamp("hello").endswith("] hello") and assistant.stamp("hello").startswith("[")
+def test_each_message_carries_the_time_and_how_it_arrived():
+    assert core.stamp("hello").endswith("] [typed] hello") and core.stamp("hello").startswith("[")
+    assert core.stamp("hello", spoken=True).endswith("] [spoken] hello")
+
+
+def test_what_may_go_to_the_web_researcher():
+    assert core.web_question_problem("latest stable version of FastAPI") is None
+    assert core.web_question_problem("   ")
+    assert core.web_question_problem("what is at https://example.com/page")
+    assert core.web_question_problem("look up priya@example.com")
+    assert core.web_question_problem(" ".join(["word"] * (core.WEB_QUESTION_WORDS + 1)))
+
+
+def test_the_instructions_list_engagements_and_what_was_remembered(store, config):
+    store.fact_add("Ravi is the client's technical lead", "Atlas")
+    text = core.core_prompt(config, store)
+    assert "Atlas" in text and "Borealis" in text
+    assert "[Atlas] Ravi is the client's technical lead" in text

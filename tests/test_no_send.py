@@ -161,7 +161,7 @@ def test_write_scanner_allows_saving_a_draft_in_one_module_only():
     call = "svc.users().drafts().create(userId='me', body=b).execute()\n"
     assert find_write_violations(call, "jarvis/google_api.py") == []
     assert find_write_violations(call, "jarvis/drafts.py")
-    assert find_write_violations(call, "jarvis/assistant.py")
+    assert find_write_violations(call, "jarvis/core.py")
 
 
 def test_write_scanner_allows_reads():

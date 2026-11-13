@@ -126,6 +126,8 @@ async def write(config: Config, transcript: Path, meeting: dict | None) -> Note 
     path.write_text(heading + body.strip() + "\n", encoding="utf-8")
     with open_store() as store:
         store.note_upsert(str(path), f"Meeting notes: {title}", heading + body.strip(), int(started.timestamp()), engagement)
+        store.artifact_add("notes", title, project=engagement, path=str(path), body=body.strip(), ts=int(started.timestamp()))
+        store.log("notes", f"Wrote the notes of {title}")
     return Note(title, engagement, at, path, body.strip())
 
 

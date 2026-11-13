@@ -17,10 +17,11 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from jarvis import dashboard
 from jarvis import meeting as live
 from jarvis import projects as project_registry
 from jarvis.config import Config
@@ -36,10 +37,21 @@ class StartRequest(BaseModel):
     headphones: bool | None = None  # None: go by what the app reports
 
 
-class AskRequest(BaseModel):
-    question: str
-    id: str | None = None  # echoed on the progress events for this question
-    web: bool | None = None  # accepted for older interfaces; the assistant decides by itself
+class TalkRequest(BaseModel):
+    text: str | None = None
+    question: str | None = None  # the older name for text
+    spoken: bool = False
+    id: str | None = None  # echoed on the events of this turn
+
+
+class AnswerRequest(BaseModel):
+    text: str
+
+
+class SettingsRequest(BaseModel):
+    auto: bool | None = None
+    speak: bool | None = None
+    auto_prep: bool | None = None
 
 
 class AutoRequest(BaseModel):
@@ -116,9 +128,16 @@ def create_app(config: Config, *, background: bool = False) -> FastAPI:
 
     @app.post("/api/auto")
     async def set_auto(body: AutoRequest) -> dict:
-        runtime.autopilot.enabled = body.enabled
-        runtime.publish_state()
+        runtime.change_settings({"auto": body.enabled})
         return runtime.state()
+
+    @app.get("/api/settings")
+    async def get_settings() -> dict:
+        return runtime.state()["settings"]
+
+    @app.post("/api/settings")
+    async def set_settings(body: SettingsRequest) -> dict:
+        return runtime.change_settings(body.model_dump())
 
     @app.post("/api/meeting/start")
     async def start_meeting(body: StartRequest | None = None) -> dict:
@@ -139,32 +158,95 @@ def create_app(config: Config, *, background: bool = False) -> FastAPI:
             raise HTTPException(409, "No meeting is running.")
         return {"ok": True}
 
-    @app.post("/api/ask")
-    async def ask(body: AskRequest) -> dict:
+    async def talk(body: TalkRequest) -> dict:
         from jarvis.agents import AgentError
 
-        question = body.question.strip()
-        if not question:
-            raise HTTPException(422, "Ask something.")
-        started = time.monotonic()
-        tag = {"id": body.id} if body.id else {}
+        text = (body.text or body.question or "").strip()
+        if not text:
+            raise HTTPException(422, "Say or type something.")
         try:
-            answer = await runtime.assistant.ask(
-                question,
-                on_step=lambda step: runtime.hub.publish({"type": "ask_step", "text": step[:160], **tag}),
-                on_text=lambda text: runtime.hub.publish({"type": "ask_delta", "text": text, **tag}),
-            )
+            return await runtime.talk(text, spoken=body.spoken, turn_id=body.id)
         except AgentError as exc:
             raise HTTPException(502, str(exc)) from None
-        return {
-            "text": answer.text, "web_queries": answer.web_queries, "drafts": answer.drafts,
-            "seconds": round(time.monotonic() - started, 1),
-        }
 
-    @app.post("/api/ask/reset")
-    async def ask_reset() -> dict:
-        await runtime.assistant.reset()
+    app.post("/api/talk")(talk)
+    app.post("/api/ask")(talk)  # the older name
+
+    @app.post("/api/talk/reset")
+    async def talk_reset() -> dict:
+        await runtime.core.reset()
+        runtime.conversation.clear()
+        runtime.publish_state()
         return {"ok": True}
+
+    app.post("/api/ask/reset")(talk_reset)
+
+    @app.get("/api/speech/{speech_id}/{seq}")
+    async def speech(speech_id: str, seq: int) -> Response:
+        try:
+            audio = await runtime.speech_audio(speech_id, seq)
+        except Exception as exc:  # the voice failed; the words are on screen anyway
+            raise HTTPException(503, f"That sentence could not be spoken: {exc}") from None
+        if audio is None:
+            raise HTTPException(404, "That sentence is no longer kept.")
+        return Response(content=audio, media_type="audio/wav")
+
+    @app.websocket("/ws/voice")
+    async def voice_socket(websocket: WebSocket) -> None:
+        from jarvis import voice
+
+        if not _local_origin(websocket.headers.get("origin")):
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        if runtime.meeting.running:  # the microphone belongs to the call
+            await websocket.send_json({"error": "busy"})
+            await websocket.close()
+            return
+        await voice.hear(websocket, runtime)
+
+    @app.get("/api/tasks")
+    async def get_tasks() -> list[dict]:
+        return [task.summary() for task in runtime.tasks.recent()]
+
+    @app.post("/api/tasks/{task_id}/answer")
+    async def answer_task(task_id: str, body: AnswerRequest) -> dict:
+        if not body.text.strip() or not runtime.tasks.answer(task_id, body.text.strip()):
+            raise HTTPException(409, "That task is not waiting for an answer.")
+        return {"ok": True}
+
+    @app.post("/api/tasks/{task_id}/stop")
+    async def stop_task(task_id: str) -> dict:
+        if not runtime.tasks.stop(task_id):
+            raise HTTPException(409, "That task is not running.")
+        return {"ok": True}
+
+    @app.post("/api/cards/{card_id}/dismiss")
+    async def dismiss_card(card_id: str) -> dict:
+        runtime.drop_card(card_id)
+        return {"ok": True}
+
+    @app.get("/api/overview")
+    async def get_overview() -> dict:
+        return dashboard.overview(runtime)
+
+    @app.get("/api/library")
+    async def get_library() -> dict:
+        return dashboard.library()
+
+    @app.get("/api/facts")
+    async def get_facts() -> list[dict]:
+        return dashboard.facts()
+
+    @app.delete("/api/facts/{fact_id}")
+    async def delete_fact(fact_id: int) -> dict:
+        if not dashboard.forget(fact_id):
+            raise HTTPException(404, "There is no fact with that number.")
+        return {"ok": True}
+
+    @app.get("/api/activity")
+    async def get_activity(limit: int = 200) -> list[dict]:
+        return dashboard.activity(max(1, min(limit, 1000)))
 
     @app.get("/api/today")
     async def get_today() -> dict:

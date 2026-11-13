@@ -24,6 +24,8 @@ KINDS = ("mail", "event", "file")
 # Files indexed from folders on this Mac are stored under this pseudo-account.
 LOCAL_ACCOUNT = "local"
 NOTE_PREFIX = "note:"  # source_id of a meeting note Jarvis wrote
+PREP_PREFIX = "prep:"  # source_id of a preparation sheet Jarvis wrote
+ARTIFACT_KINDS = ("prep", "notes", "brief", "draft", "file", "folder")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -149,6 +151,36 @@ CREATE TABLE IF NOT EXISTS local_files (
     mtime   REAL NOT NULL,
     size    INTEGER NOT NULL,
     PRIMARY KEY (project, path)
+);
+
+CREATE TABLE IF NOT EXISTS facts (
+    id      INTEGER PRIMARY KEY,
+    project TEXT,                    -- nullable: about the user's work in general
+    text    TEXT NOT NULL,
+    source  TEXT NOT NULL DEFAULT 'user',
+    ts      INTEGER NOT NULL
+);
+
+-- What Jarvis made: preparation sheets, notes, briefs, drafts, files and folders.
+CREATE TABLE IF NOT EXISTS artifacts (
+    id      INTEGER PRIMARY KEY,
+    kind    TEXT NOT NULL,
+    title   TEXT NOT NULL,
+    project TEXT,
+    path    TEXT,                    -- a file or folder on this Mac, when there is one
+    link    TEXT,
+    body    TEXT NOT NULL DEFAULT '',
+    meta    TEXT NOT NULL DEFAULT '{}',
+    ts      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS artifacts_kind_ts ON artifacts(kind, ts);
+
+-- What Jarvis did, for the dashboard.
+CREATE TABLE IF NOT EXISTS activity (
+    id   INTEGER PRIMARY KEY,
+    ts   INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS docs (
@@ -825,13 +857,14 @@ class Store:
 
     # --- notes Jarvis writes itself ----------------------------------------
 
-    def note_upsert(self, path: str, title: str, body: str, ts: int, project: str | None) -> None:
-        """Index a meeting note so later questions and briefs can find it.
+    def note_upsert(self, path: str, title: str, body: str, ts: int, project: str | None,
+                    prefix: str = NOTE_PREFIX) -> None:
+        """Index a meeting note (or, with ``PREP_PREFIX``, a preparation sheet) so later questions can find it.
 
-        Notes are kept apart from ``local_files``: a folder sync removes what is
-        no longer in a project's folders, and notes do not live in one.
+        These are kept apart from ``local_files``: a folder sync removes what is
+        no longer in a project's folders, and Jarvis's own writing does not live in one.
         """
-        source_id = f"{NOTE_PREFIX}{path}"
+        source_id = f"{prefix}{path}"
         with self._tx():
             self._upsert_doc(LOCAL_ACCOUNT, "file", source_id, title, body, "", ts, f"file://{path}")
             self.db.execute(
@@ -855,6 +888,82 @@ class Store:
     def note_delete(self, path: str) -> None:
         with self._tx():
             self._delete_doc(LOCAL_ACCOUNT, "file", f"{NOTE_PREFIX}{path}")
+
+    # --- what the user told Jarvis to remember -----------------------------------
+
+    def fact_add(self, text: str, project: str | None = None, source: str = "user") -> int:
+        with self._tx():
+            cursor = self.db.execute(
+                "INSERT INTO facts(project, text, source, ts) VALUES (?,?,?,?)",
+                (project, text.strip(), source, int(time.time())),
+            )
+        return int(cursor.lastrowid)
+
+    def fact_delete(self, fact_id: int) -> bool:
+        with self._tx():
+            return self.db.execute("DELETE FROM facts WHERE id=?", (fact_id,)).rowcount > 0
+
+    def facts(self, project: str | None = None, limit: int = 60) -> list[dict]:
+        """Newest first. With ``project``: that project's facts and the general ones."""
+        where, args = "", []
+        if project is not None:
+            where = "WHERE project=? OR project IS NULL"
+            args.append(project)
+        rows = self.db.execute(
+            f"SELECT id, project, text, source, ts FROM facts {where} ORDER BY ts DESC, id DESC LIMIT ?",
+            [*args, limit],
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    # --- what Jarvis made and did ------------------------------------------------
+
+    def artifact_add(self, kind: str, title: str, *, project: str | None = None, path: str | None = None,
+                     link: str | None = None, body: str = "", meta: dict | None = None,
+                     ts: int | None = None) -> int:
+        if kind not in ARTIFACT_KINDS:
+            raise ValueError(f"kind must be one of {', '.join(ARTIFACT_KINDS)}")
+        with self._tx():
+            cursor = self.db.execute(
+                "INSERT INTO artifacts(kind, title, project, path, link, body, meta, ts) VALUES (?,?,?,?,?,?,?,?)",
+                (kind, title, project, path, link, body, json.dumps(meta or {}), ts or int(time.time())),
+            )
+        return int(cursor.lastrowid)
+
+    def artifacts(self, kind: str | None = None, *, project: str | None = None, since: int | None = None,
+                  limit: int = 50) -> list[dict]:
+        """Newest first."""
+        filters, args = [], []
+        for column, value in (("kind", kind), ("project", project)):
+            if value is not None:
+                filters.append(f"{column}=?")
+                args.append(value)
+        if since is not None:
+            filters.append("ts >= ?")
+            args.append(since)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+        rows = self.db.execute(
+            f"SELECT id, kind, title, project, path, link, body, meta, ts FROM artifacts {where} "
+            "ORDER BY ts DESC, id DESC LIMIT ?",
+            [*args, limit],
+        ).fetchall()
+        return [{**dict(row), "meta": json.loads(row["meta"] or "{}")} for row in rows]
+
+    def artifact_counts(self) -> dict[str, int]:
+        return {row[0]: row[1] for row in self.db.execute("SELECT kind, COUNT(*) FROM artifacts GROUP BY kind")}
+
+    def artifact_made(self, path: str) -> bool:
+        """True when Jarvis itself created the file or folder at ``path``."""
+        return self.db.execute("SELECT 1 FROM artifacts WHERE path=? LIMIT 1", (path,)).fetchone() is not None
+
+    def log(self, kind: str, text: str) -> None:
+        with self._tx():
+            self.db.execute("INSERT INTO activity(ts, kind, text) VALUES (?,?,?)", (int(time.time()), kind, text))
+
+    def activity(self, limit: int = 200) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT ts, kind, text FROM activity ORDER BY ts DESC, id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # --- status ------------------------------------------------------------
 

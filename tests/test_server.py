@@ -11,7 +11,7 @@ from jarvis.server import create_app
 
 
 @pytest.fixture
-def client(fake_home):
+def client(fake_home, monkeypatch):
     app = create_app(load_config())
     runtime = app.state.runtime
     calls: list[str] = []
@@ -26,12 +26,11 @@ def client(fake_home):
 
     runtime.meeting.start = start  # no real listening in tests
     runtime.meeting.stop = stop
-    type(runtime.meeting).running = property(lambda self: self.status != "idle")
+    monkeypatch.setattr(type(runtime.meeting), "running", property(lambda self: self.status != "idle"))
     with TestClient(app) as opened:
         opened.calls = calls
         opened.runtime = runtime
         yield opened
-    del type(runtime.meeting).running
 
 
 def _report(active: bool) -> dict:

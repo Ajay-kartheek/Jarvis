@@ -115,6 +115,9 @@ async def write(config: Config, now: datetime | None = None) -> dict | None:
         return None
     brief = {"date": now.date().isoformat(), "at": now.astimezone().isoformat(timespec="minutes"), "text": text}
     (_folder() / f"{brief['date']}.json").write_text(json.dumps(brief, ensure_ascii=False), encoding="utf-8")
+    with open_store() as store:
+        store.artifact_add("brief", f"Brief for {now:%A %d %B}", body=text)
+        store.log("brief", "Wrote the morning brief")
     return brief
 
 
