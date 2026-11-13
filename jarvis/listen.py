@@ -256,9 +256,10 @@ class WindowText:
     pauses, which is enough for the written record and costs far less.
     """
 
-    def __init__(self, model, *, live: bool) -> None:
+    def __init__(self, model, *, live: bool, boosted=None) -> None:
         self.model = model
         self.live = live
+        self.boosted = boosted  # a decoding setting that leans towards the user's words; used for finished sentences only
         self.window = np.zeros(0, dtype=np.float32)
         self.fresh = 0  # samples added since the last decode
         self.partial = ""
@@ -286,8 +287,9 @@ class WindowText:
 
         tokens = self._decode()
         if pause:
+            spoken = self.window
             self._reset()
-            return self._sentences(tokens)
+            return self._corrected(spoken, self._sentences(tokens))
 
         # A sentence is final once it ended a while ago and the next word has begun.
         horizon = seconds - SETTLE_SECONDS
@@ -307,12 +309,28 @@ class WindowText:
 
         finished: list[str] = []
         if cut is not None:
-            finished = self._sentences(tokens[: cut + 1])
             keep_from = (tokens[cut].end + tokens[cut + 1].start) / 2
-            self.window = self.window[int(max(0.0, keep_from - 0.1) * SAMPLE_RATE) :]
+            edge = int(max(0.0, keep_from - 0.1) * SAMPLE_RATE)
+            finished = self._corrected(self.window[: edge + int(0.1 * SAMPLE_RATE)], self._sentences(tokens[: cut + 1]))
+            self.window = self.window[edge:]
             tokens = tokens[cut + 1 :]
         self.partial = self._join(tokens)
         return finished
+
+    def _corrected(self, samples: np.ndarray, plain: list[str]) -> list[str]:
+        """The finished sentences read once more, leaning towards the user's words, if that reading holds up."""
+        if self.boosted is None or not plain or len(samples) < MIN_WINDOW_SECONDS * SAMPLE_RATE:
+            return plain
+        from jarvis.vocabulary import agrees
+
+        try:
+            started = time.perf_counter()
+            mel = get_logmel(mx.array(samples), self.model.preprocessor_config)
+            leaning = self._sentences(list(self.model.generate(mel, decoding_config=self.boosted)[0].tokens))
+            self.decode_seconds += time.perf_counter() - started
+        except Exception:  # the plain reading is always there to fall back on
+            return plain
+        return leaning if leaning and agrees(" ".join(plain), " ".join(leaning)) else plain
 
     def _decode(self) -> list:
         started = time.perf_counter()
@@ -385,7 +403,10 @@ def _listen(args, model, load_seconds: float) -> int:
 
     poll_seconds = 0.1
     sources = ["system"] if args.wav else ["system", "mic"]
-    texts = {source: WindowText(model, live=source == "system") for source in sources}
+    from jarvis import speech
+
+    boosted = speech.boosted(getattr(args, "vocabulary", None) or ())
+    texts = {source: WindowText(model, live=source == "system", boosted=boosted) for source in sources}
     gates = {"system": Gate(floor=0.0008), "mic": Gate(floor=0.006)}
     audio = WavAudio(args.wav, poll_seconds) if args.wav else HelperAudio()
 

@@ -27,10 +27,10 @@ LEVEL_EVERY_SECONDS = 0.08
 class Utterance:
     """The words of one spoken message, recognised as the audio arrives."""
 
-    def __init__(self, model) -> None:
+    def __init__(self, model, boosted=None) -> None:
         from jarvis.listen import WindowText
 
-        self._window = WindowText(model, live=True)
+        self._window = WindowText(model, live=True, boosted=boosted)
         self._done: list[str] = []
 
     def add(self, samples: np.ndarray) -> None:
@@ -50,6 +50,20 @@ class Utterance:
         return " ".join([*self._done, self._window.partial]).strip()
 
 
+def _ready(config) -> tuple:
+    """The recogniser and the setting that leans towards the user's words. Blocking: run it off the event loop."""
+    from jarvis import speech, vocabulary
+    from jarvis.store import open_store
+
+    model = speech.acquire()
+    try:
+        with open_store() as store:
+            known = vocabulary.words(store, config)
+        return model, speech.boosted(known)
+    except Exception:  # the plain recogniser is enough to hear a message
+        return model, None
+
+
 async def hear(websocket, runtime: "Runtime") -> None:
     """Receive one utterance on ``websocket`` and pass it on as a spoken message."""
     from jarvis import speech
@@ -57,7 +71,7 @@ async def hear(websocket, runtime: "Runtime") -> None:
     hub = runtime.hub
     hub.publish({"type": "voice", "phase": "listening"})
     runtime.warm_voice()
-    loading = asyncio.create_task(asyncio.to_thread(speech.acquire))
+    loading = asyncio.create_task(asyncio.to_thread(_ready, runtime.config))
     utterance: Utterance | None = None
     waiting: list[np.ndarray] = []  # audio that arrived before the model was ready
     samples_heard = 0
@@ -90,7 +104,7 @@ async def hear(websocket, runtime: "Runtime") -> None:
                 loudness = float(np.sqrt(np.mean(np.square(chunk, dtype=np.float64))))
                 hub.publish({"type": "level", "source": "voice", "level": round(min(1.0, loudness * 12), 3)})
             if utterance is None and loading.done():
-                utterance = Utterance(loading.result())
+                utterance = Utterance(*loading.result())
                 for early in waiting:
                     utterance.add(early)
                 waiting = []
@@ -105,10 +119,10 @@ async def hear(websocket, runtime: "Runtime") -> None:
     finally:
         final = ""
         try:
-            model = await loading
+            ready = await loading
             if not cancelled and samples_heard >= MIN_SECONDS * SAMPLE_RATE:
                 if utterance is None:
-                    utterance = Utterance(model)
+                    utterance = Utterance(*ready)
                     for early in waiting:
                         utterance.add(early)
                 final = await asyncio.to_thread(utterance.finish)
