@@ -463,6 +463,9 @@ class Runtime:
         meeting = read_meta(transcript)
         if meeting.get("noted"):
             return
+        if not transcript.exists():  # nothing was said: leave no trace of the meeting
+            meta_path(transcript).unlink(missing_ok=True)
+            return
         try:
             note = await notes.write(self.config, transcript, meeting)
         except Exception as exc:
