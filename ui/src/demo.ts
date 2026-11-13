@@ -57,8 +57,33 @@ const ASK_REPLY = `**Atlas** is on track for the 14th. Three things to keep in v
 
 This is a canned demo reply. The [project notes](https://example.com/atlas) would be linked here.`;
 
+const BRIEF = `## Today
+- 10:00 Atlas weekly sync: have the sign-off status and the rehearsal date ready.
+- 11:30 Borealis support review: Meera expects the weekend cover costs.
+
+## Needs your reply
+- **Ravi**: asks whether the rehearsal can move to Wednesday.
+- **Meera**: wants the support terms confirmed in writing by Friday.`;
+
+const NOTES = `## Summary
+The migration stays on the 14th, provided the data sign-off lands by Friday.
+
+## Action items
+- Me: send the rehearsal checklist to Ravi (Tuesday)
+- Ravi: close the two open sign-off checks`;
+
 export function createDemo(emit: (msg: ServerMessage) => void): { api: Api; stop: () => void } {
-  let app: AppState = { status: "idle", meeting: null, engagements: ENGAGEMENTS };
+  let app: AppState = {
+    status: "idle",
+    meeting: null,
+    engagements: ENGAGEMENTS,
+    auto: true,
+    app: false,
+    call: { active: false, app: null },
+    notices: [],
+    last_sync: null,
+    syncing: false,
+  };
   let run: AbortController | null = null; // set while a meeting is playing
   let meter = 0;
   let talking: Speaker | null = null;
@@ -168,11 +193,15 @@ export function createDemo(emit: (msg: ServerMessage) => void): { api: Api; stop
       if (run) reply("Requested by you", MANUAL_REPLY, [], run.signal).catch(() => undefined);
       return { ok: true };
     },
-    ask: (question, web) =>
+    ask: (_question, id) =>
       new Promise((resolve) => {
-        const web_queries = web ? [question, `${question} latest`] : [];
-        setTimeout(() => resolve({ text: ASK_REPLY, web_queries, seconds: 1.8 }), 1800);
+        setTimeout(() => emit({ type: "ask_step", id, text: "search: Atlas status" }), 400);
+        setTimeout(() => emit({ type: "ask_step", id, text: "read: Migration plan v3" }), 1000);
+        setTimeout(() => resolve({ text: ASK_REPLY, web_queries: [], seconds: 1.8 }), 1800);
       }),
+    resetAsk: async () => ({ ok: true }),
+    setAuto: async (enabled) => update({ auto: enabled }),
+    reconnect: async () => ({ account: "you@example.com" }),
     today: async () => ({
       date: new Date().toLocaleDateString("en-CA"), // local YYYY-MM-DD
       meetings: [
@@ -193,6 +222,8 @@ export function createDemo(emit: (msg: ServerMessage) => void): { api: Api; stop
         { title: "Planning hour", start: iso(240 * MINUTE), end: iso(300 * MINUTE), engagement: null, people: [] },
       ],
       engagements: ENGAGEMENTS,
+      brief: { date: daysAgo(0), at: iso(-3 * 60 * MINUTE), text: BRIEF },
+      notes: [{ title: "Atlas weekly sync", engagement: "Atlas", at: iso(-26 * 60 * MINUTE), text: NOTES }],
     }),
   };
 

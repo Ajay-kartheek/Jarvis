@@ -20,6 +20,13 @@ export type HistoryItem =
   | { key: number; kind: "suggestion"; item: Suggestion }
   | { key: number; kind: "line"; speaker: Speaker | "Info"; text: string; at: string };
 
+/** What the assistant has reported so far about the question with this id. */
+export interface AskStream {
+  id: string | null;
+  steps: string[]; // what it looked up, oldest first
+  text: string; // the answer so far
+}
+
 export interface Model {
   app: AppState;
   partial: Record<Speaker, string>;
@@ -27,6 +34,8 @@ export interface Model {
   history: HistoryItem[]; // newest first
   info: { text: string; warn: boolean; at: number } | null;
   seq: number; // next history key
+  ask: AskStream;
+  fresh: number; // goes up when notes or a brief arrive, so Today reads them again
 }
 
 export type Link = "connecting" | "live" | "offline" | "demo";
@@ -38,14 +47,32 @@ type Action = { msg: ServerMessage; now: number } | { warn: string; now: number 
 
 const HISTORY_MAX = 200;
 const DEMO_AFTER_MS = 2000;
+const STEPS_MAX = 40;
 const BLANK: Model = {
-  app: { status: "idle", meeting: null, engagements: [] },
+  app: {
+    status: "idle",
+    meeting: null,
+    engagements: [],
+    auto: true,
+    app: false,
+    call: { active: false, app: null },
+    notices: [],
+    last_sync: null,
+    syncing: false,
+  },
   partial: { Them: "", You: "" },
   current: null,
   history: [],
   info: null,
   seq: 0,
+  ask: { id: null, steps: [], text: "" },
+  fresh: 0,
 };
+
+/** The stream for question `id`, started afresh if the messages so far were about another one. */
+function stream(m: Model, id: string | undefined): AskStream {
+  return m.ask.id === (id ?? null) ? m.ask : { id: id ?? null, steps: [], text: "" };
+}
 
 function remember(m: Model, entry: (key: number) => HistoryItem): Model {
   return { ...m, seq: m.seq + 1, history: [entry(m.seq), ...m.history].slice(0, HISTORY_MAX) };
@@ -83,7 +110,9 @@ function reduce(m: Model, action: Action): Model {
       const app: AppState = { ...m.app, ...next };
       const started = app.meeting?.started_at;
       // A meeting we have not seen before starts with a clean transcript.
-      if (started && started !== m.app.meeting?.started_at) return { ...BLANK, app, info: m.info, seq: m.seq };
+      if (started && started !== m.app.meeting?.started_at) {
+        return { ...BLANK, app, info: m.info, seq: m.seq, ask: m.ask, fresh: m.fresh };
+      }
       return app.meeting ? { ...m, app } : { ...m, app, partial: BLANK.partial, current: settle(m.current) };
     }
     case "partial":
@@ -114,6 +143,16 @@ function reduce(m: Model, action: Action): Model {
       const noted = { ...m, info: { text: msg.text, warn: false, at: now } };
       return remember(noted, (key) => ({ key, kind: "line", speaker: "Info", text: msg.text, at }));
     }
+    case "ask_step": {
+      const ask = stream(m, msg.id);
+      return { ...m, ask: { ...ask, steps: [...ask.steps, msg.text].slice(-STEPS_MAX) } };
+    }
+    case "ask_delta":
+      return { ...m, ask: { ...stream(m, msg.id), text: msg.text } };
+    case "notes":
+      return { ...m, fresh: m.fresh + 1, info: { text: `Notes ready: ${msg.title}`, warn: false, at: now } };
+    case "brief":
+      return { ...m, fresh: m.fresh + 1, info: { text: "Your brief for today is ready", warn: false, at: now } };
     default:
       return m; // levels are handled before the reducer; unknown types are ignored
   }
@@ -173,7 +212,7 @@ export function useJarvis() {
 
   /** Runs one server call; a returned state is applied at once and a failure becomes a warning toast. */
   const run = useCallback(
-    async (job: (api: Api) => Promise<AppState | { ok: true }>) => {
+    async (job: (api: Api) => Promise<AppState | { ok: true } | { account: string }>) => {
       try {
         const result = await job(api);
         if ("status" in result) dispatch({ msg: { type: "state", ...result }, now: Date.now() });
@@ -184,11 +223,13 @@ export function useJarvis() {
     [api],
   );
   const start = useCallback(
-    (project: string | null, headphones: boolean) => run((a) => a.startMeeting(project, headphones)),
+    (project: string | null, headphones: boolean | null) => run((a) => a.startMeeting(project, headphones)),
     [run],
   );
+  const setAuto = useCallback((enabled: boolean) => run((a) => a.setAuto(enabled)), [run]);
+  const reconnect = useCallback(() => run((a) => a.reconnect()), [run]);
   const stop = useCallback(() => run((a) => a.stopMeeting()), [run]);
   const suggest = useCallback(() => run((a) => a.suggest()), [run]);
 
-  return { model, link, api, start, stop, suggest };
+  return { model, link, api, start, stop, suggest, setAuto, reconnect };
 }

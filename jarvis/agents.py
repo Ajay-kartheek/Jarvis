@@ -58,6 +58,7 @@ class Answer:
     text: str
     web_queries: list[str] = field(default_factory=list)
     seconds: float = 0.0
+    drafts: list[dict] = field(default_factory=list)  # saved in Gmail Drafts while answering
 
 
 # --- tools over the local copy ----------------------------------------------
@@ -266,6 +267,12 @@ async def _run(prompt: str, options: ClaudeAgentOptions, notify: Notify | None) 
                 raise AgentError(message.result or f"The agent stopped: {message.subtype}")
             text = message.result or ""
     return text.strip()
+
+
+async def run_plain(config: Config, job: str, system_prompt: str, prompt: str) -> str:
+    """One answer from a model that has no tools at all: for notes, briefs and sorting."""
+    options = _options(_route(config, job, job), system_prompt, tools=[], max_turns=1)
+    return await _run(prompt, options, None)
 
 
 _WEB_SECTION = re.compile(r"\n\s*WEB:\s*\n(?P<queries>.*)\Z", re.DOTALL)

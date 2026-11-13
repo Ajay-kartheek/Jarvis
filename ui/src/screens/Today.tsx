@@ -1,27 +1,65 @@
 import { memo, useEffect, useState } from "react";
 import type { Api, Today as TodayData } from "../api";
 import { Frame } from "../components/Frame";
-import { hhmm, longDate, parseTime } from "../format";
+import { hhmm, longDate, parseTime, shortDate } from "../format";
 import { useNow } from "../hooks";
+import { Markdown } from "../markdown";
 
-/** Memoised: it only depends on which server it reads from, not on the meeting stream. */
-export const Today = memo(function Today({ api }: { api: Api }) {
+const REFRESH_MS = 5 * 60_000;
+const JUST_MET_MS = 3 * 60 * 60_000;
+
+/**
+ * Memoised: it depends on which server it reads from and on `fresh`, which goes up when new notes
+ * or a brief arrive, not on the meeting stream.
+ */
+export const Today = memo(function Today({ api, fresh }: { api: Api; fresh: number }) {
   const [data, setData] = useState<TodayData | null>(null);
   const [error, setError] = useState("");
+  const [open, setOpen] = useState(0); // which note is unfolded
   const now = useNow(30_000);
+  const round = Math.floor(now / REFRESH_MS); // read again every few minutes: the calendar moves
 
   useEffect(() => {
     let current = true;
-    setError("");
     api.today().then(
-      (today) => current && setData(today),
+      (today) => {
+        if (!current) return;
+        setData(today);
+        setError("");
+      },
       (reason) => current && setError(reason instanceof Error ? reason.message : String(reason)),
     );
     return () => {
       current = false;
     };
-  }, [api]);
+  }, [api, fresh, round]);
 
+  const notes = data?.notes ?? [];
+  // Straight after a call its notes are what the user came for, so they go to the top.
+  const justMet = notes.length > 0 && now - parseTime(notes[0].at) < JUST_MET_MS;
+  const notesFrame = notes.length > 0 && (
+    <Frame i={3} className="notes">
+          <div className="label">Meeting notes</div>
+          <ul className="agenda">
+            {notes.map((note, i) => (
+              <li key={note.at + note.title} className="note">
+                <button className="note-head" aria-expanded={open === i} onClick={() => setOpen(open === i ? -1 : i)}>
+                  <span className="when">
+                    {shortDate(note.at.slice(0, 10))} {hhmm(note.at)}
+                  </span>
+                  <strong>{note.title}</strong>
+                  {note.engagement && <span className="chip">{note.engagement}</span>}
+                </button>
+                {open === i && (
+                  <div className="md">
+                    <Markdown text={note.text.replace(/^# .*\n+.*\n+/, "")} />
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </Frame>
+  );
   return (
     <div className="today">
       <Frame i={0}>
@@ -30,7 +68,18 @@ export const Today = memo(function Today({ api }: { api: Api }) {
         {error && <p className="warn">{error}</p>}
       </Frame>
 
-      <Frame i={1}>
+      {justMet && notesFrame}
+
+      {data?.brief && (
+        <Frame i={1} className="brief">
+          <div className="label">Brief · written {hhmm(data.brief.at)}</div>
+          <div className="md">
+            <Markdown text={data.brief.text} />
+          </div>
+        </Frame>
+      )}
+
+      <Frame i={2}>
         <div className="label">Meetings</div>
         {data?.meetings.length === 0 && <p className="quiet">No meetings today.</p>}
         <ul className="agenda">
@@ -49,7 +98,9 @@ export const Today = memo(function Today({ api }: { api: Api }) {
         </ul>
       </Frame>
 
-      <Frame i={2}>
+      {!justMet && notesFrame}
+
+      <Frame i={4}>
         <div className="label">Engagements</div>
         {data?.engagements.length === 0 && <p className="quiet">No engagements set up.</p>}
         <ul className="agenda">

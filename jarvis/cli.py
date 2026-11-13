@@ -487,5 +487,74 @@ def ui(
     uvicorn.run(create_app(_config()), host="127.0.0.1", port=port, log_level="warning")
 
 
+def _exit_with_parent() -> None:
+    """Stop when the Jarvis app goes away: it holds the other end of our standard input."""
+    import os
+    import signal
+    import stat
+    import sys
+    import threading
+
+    if not stat.S_ISFIFO(os.fstat(sys.stdin.fileno()).st_mode):
+        return
+
+    def wait() -> None:
+        while sys.stdin.buffer.read(4096):
+            pass
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=wait, daemon=True).start()
+
+
+@app.command("daemon")
+def daemon(port: Annotated[int, typer.Option(help="Port on 127.0.0.1.")] = 8765) -> None:
+    """Run Jarvis in the background: automatic listening on calls, syncs, notes, the brief and the interface.
+
+    The Jarvis app starts this by itself; `jarvis install` sets that up.
+    """
+    import logging
+    import os
+
+    import uvicorn
+
+    from jarvis.server import create_app
+
+    logging.basicConfig(format="%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    logging.getLogger("jarvis").setLevel(logging.INFO)
+    config = _config()
+    if os.environ.get("JARVIS_APP"):
+        _exit_with_parent()
+    logging.getLogger("jarvis").info("daemon starting on port %d", port)
+    uvicorn.run(
+        create_app(config, background=True), host="127.0.0.1", port=port, log_level="warning",
+        timeout_graceful_shutdown=3,  # the app keeps its connection open; do not wait for it on the way out
+    )
+
+
+@app.command("install")
+def install_command(
+    port: Annotated[int, typer.Option(help="Port on 127.0.0.1 for the interface.")] = 8765,
+    rebuild: Annotated[bool, typer.Option("--rebuild", help="Build the app again first.")] = False,
+) -> None:
+    """Make Jarvis run by itself: install the app, start it now and at every login."""
+    from jarvis import install
+
+    _config()  # fail early on a broken config.toml
+    try:
+        install.install(port, rebuild=rebuild, progress=typer.echo)
+    except install.InstallError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(1) from None
+    typer.echo("Control+Option+J shows and hides Jarvis. It listens by itself when a call starts.")
+
+
+@app.command("uninstall")
+def uninstall_command() -> None:
+    """Stop Jarvis running by itself and remove the app. Data and settings stay."""
+    from jarvis import install
+
+    install.uninstall(progress=typer.echo)
+
+
 if __name__ == "__main__":
     app()

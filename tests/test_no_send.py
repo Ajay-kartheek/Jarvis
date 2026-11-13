@@ -1,9 +1,9 @@
-"""Jarvis is read-only against Google for now, and must never deliver mail.
+"""Jarvis reads from Google, may save a mail draft, and must never deliver mail.
 
-Google's compose permission (needed later to create drafts) also allows
-delivery, so "never send" cannot be enforced by permissions. These tests scan
-the package source instead and fail if a delivery call, endpoint or wider
-scope appears, or if any Google API call other than a read is made.
+Google's compose permission (needed to save drafts) also allows delivery, so
+"never send" cannot be enforced by permissions. These tests scan the package
+source instead and fail if a delivery call, endpoint or wider scope appears,
+or if any Google API call is made other than a read or the one draft save.
 """
 
 from __future__ import annotations
@@ -42,6 +42,10 @@ READ_METHODS = {
 }
 
 
+# The one change Jarvis may make in Google, and the only module that may make it.
+ALLOWED_WRITES = {("drafts", "create"): {"jarvis/google_api.py"}}
+
+
 def find_send_violations(source: str, filename: str) -> list[str]:
     problems = [f"{filename}: contains {text!r}" for text in FORBIDDEN_TEXT if text in source]
     for node in ast.walk(ast.parse(source, filename=filename)):
@@ -75,6 +79,8 @@ def find_write_violations(source: str, filename: str) -> list[str]:
             and receiver.func.attr in GOOGLE_RESOURCES
         )
         method = node.func.attr
+        if on_resource and filename in ALLOWED_WRITES.get((receiver.func.attr, method), ()):
+            continue
         if on_resource and method not in READ_METHODS and method not in GOOGLE_RESOURCES:
             problems.append(f"{filename}:{node.lineno}: .{receiver.func.attr}().{method}()")
     return problems
@@ -149,6 +155,13 @@ def test_write_scanner_catches_changes_to_google_data():
         "svc.permissions().create(fileId=f, body=b)",
     ):
         assert find_write_violations(call + ".execute()\n", "jarvis/x.py"), call
+
+
+def test_write_scanner_allows_saving_a_draft_in_one_module_only():
+    call = "svc.users().drafts().create(userId='me', body=b).execute()\n"
+    assert find_write_violations(call, "jarvis/google_api.py") == []
+    assert find_write_violations(call, "jarvis/drafts.py")
+    assert find_write_violations(call, "jarvis/assistant.py")
 
 
 def test_write_scanner_allows_reads():

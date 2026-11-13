@@ -16,10 +16,23 @@ export interface MeetingInfo {
   started_at: string;
 }
 
+export interface Notice {
+  key: string; // "signin" and "permissions" are the ones the interface knows how to act on
+  text: string;
+}
+
 export interface AppState {
   status: Status;
   meeting: MeetingInfo | null;
   engagements: Engagement[];
+  /** Listening starts by itself when a call does. */
+  auto: boolean;
+  /** The Jarvis app is running and reporting calls. */
+  app: boolean;
+  call: { active: boolean; app: string | null };
+  notices: Notice[];
+  last_sync: string | null;
+  syncing: boolean;
 }
 
 export interface Source {
@@ -28,10 +41,30 @@ export interface Source {
   date: string;
 }
 
+export interface SavedDraft {
+  subject: string;
+  to: string[];
+  link: string;
+}
+
 export interface AskReply {
   text: string;
   web_queries: string[];
   seconds: number;
+  drafts?: SavedDraft[];
+}
+
+export interface Note {
+  title: string;
+  engagement: string | null;
+  at: string;
+  text: string;
+}
+
+export interface Brief {
+  date: string;
+  at: string;
+  text: string;
 }
 
 export interface TodayMeeting {
@@ -46,6 +79,8 @@ export interface Today {
   date: string;
   meetings: TodayMeeting[];
   engagements: Engagement[];
+  brief?: Brief | null;
+  notes?: Note[];
 }
 
 export type ServerMessage =
@@ -57,14 +92,23 @@ export type ServerMessage =
   | { type: "suggestion"; id: number; question: string; text: string; sources: Source[]; seconds: number; at: string }
   | { type: "no_suggestion"; id: number }
   | { type: "level"; source: "system" | "mic"; level: number }
-  | { type: "info"; text: string };
+  | { type: "info"; text: string }
+  | { type: "ask_step"; id?: string; text: string }
+  | { type: "ask_delta"; id?: string; text: string }
+  | ({ type: "notes" } & Note)
+  | ({ type: "brief" } & Brief);
 
 export interface Api {
   state(): Promise<AppState>;
-  startMeeting(project: string | null, headphones: boolean): Promise<AppState>;
+  /** `headphones` null leaves it to the app, which knows what the sound is playing through. */
+  startMeeting(project: string | null, headphones: boolean | null): Promise<AppState>;
   stopMeeting(): Promise<AppState>;
   suggest(): Promise<{ ok: true }>;
-  ask(question: string, web: boolean): Promise<AskReply>;
+  /** `id` comes back on the progress messages for this question. */
+  ask(question: string, id: string): Promise<AskReply>;
+  resetAsk(): Promise<{ ok: true }>;
+  setAuto(enabled: boolean): Promise<AppState>;
+  reconnect(): Promise<{ account: string }>;
   today(): Promise<Today>;
 }
 
@@ -92,7 +136,10 @@ export const rest: Api = {
   startMeeting: (project, headphones) => call("POST", "/api/meeting/start", { project, headphones }),
   stopMeeting: () => call("POST", "/api/meeting/stop"),
   suggest: () => call("POST", "/api/meeting/suggest"),
-  ask: (question, web) => call("POST", "/api/ask", { question, web }),
+  ask: (question, id) => call("POST", "/api/ask", { question, id }),
+  resetAsk: () => call("POST", "/api/ask/reset"),
+  setAuto: (enabled) => call("POST", "/api/auto", { enabled }),
+  reconnect: () => call("POST", "/api/reconnect"),
   today: () => call("GET", "/api/today"),
 };
 

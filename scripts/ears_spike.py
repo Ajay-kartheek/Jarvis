@@ -1,4 +1,4 @@
-"""Capture check for JarvisEars: start the helper, receive both audio streams, report levels.
+"""Capture check for the Jarvis app's audio helper: start it, receive both audio streams, report levels.
 
 Standard library only, so it runs before any speech model is installed:
 
@@ -23,7 +23,7 @@ import time
 import wave
 from pathlib import Path
 
-APP = Path(__file__).resolve().parent.parent / "ears" / "build" / "JarvisEars.app"
+APP = Path(__file__).resolve().parent.parent / "app" / "build" / "Jarvis.app"
 HEADER = struct.Struct("<2sBBI")
 SOURCES = {0: "system", 1: "mic"}
 STATUS = 2
@@ -104,7 +104,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if not APP.exists():
-        print(f"{APP} is missing. Run: bash ears/build.sh")
+        print(f"{APP} is missing. Run: bash app/build.sh")
         return 1
 
     server = socket.create_server(("127.0.0.1", 0))
@@ -114,7 +114,7 @@ def main() -> int:
     try:
         conn, _ = server.accept()
     except TimeoutError:
-        print("JarvisEars did not connect within 20 seconds.")
+        print("The audio helper did not connect within 20 seconds.")
         return 1
 
     audio = {"system": array.array("f"), "mic": array.array("f")}

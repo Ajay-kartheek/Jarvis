@@ -11,7 +11,7 @@ import { InlineText } from "../markdown";
 
 interface Props {
   model: Model;
-  onStart: (project: string | null, headphones: boolean) => Promise<void>;
+  onStart: (project: string | null, headphones: boolean | null) => Promise<void>;
   onStop: () => Promise<void>;
   onSuggest: () => void;
 }
@@ -60,7 +60,7 @@ const TopBar = memo(function TopBar({ app, onStart, onStop }: { app: AppState } 
     <Frame i={0} className="topbar">
       <div className="row">
         <Ticker className="clock" text={clock(now)} />
-        <h1 className="title">{meeting?.title ?? (active ? "Starting…" : "No meeting")}</h1>
+        <h1 className="title">{meeting?.title ?? (active ? "Starting…" : app.app && app.auto ? "Standing by" : "No meeting")}</h1>
         <motion.span key={status} className="status" data-status={status} {...DROP_IN}>
           {status}
         </motion.span>
@@ -86,23 +86,34 @@ const TopBar = memo(function TopBar({ app, onStart, onStop }: { app: AppState } 
               <option key={e.name}>{e.name}</option>
             ))}
           </select>
-          <label className="toggle">
-            <input type="checkbox" checked={headphones} onChange={(e) => setHeadphones(e.target.checked)} />
-            Headphones
-          </label>
+          {/* The app knows what the sound is playing through; only a plain browser has to ask. */}
+          {!app.app && (
+            <label className="toggle">
+              <input type="checkbox" checked={headphones} onChange={(e) => setHeadphones(e.target.checked)} />
+              Headphones
+            </label>
+          )}
           <button
             className="btn"
             data-augmented-ui={CLIPPED}
-            onClick={() => act(onStart(chosen || null, headphones))}
+            onClick={() => act(onStart(chosen || null, app.app ? null : headphones))}
             disabled={busy}
           >
-            Start
+            {app.app ? "Start now" : "Start"}
           </button>
         </motion.div>
       )}
+      {!active && app.app && <p className="auto-line">{autoLine(app)}</p>}
     </Frame>
   );
 });
+
+/** Tells the user that nothing needs pressing, or why something does. */
+function autoLine(app: AppState): string {
+  if (app.call.active) return "A call is on. Press Start now to listen to it.";
+  if (!app.auto) return "Automatic listening is off. Turn AUTO on, or press Start now.";
+  return "Listening starts by itself when a call begins.";
+}
 
 /** The sentence being spoken right now, with the level meter under it. */
 function LiveLine({ partial, status }: { partial: Record<Speaker, string>; status: Status }) {

@@ -1,4 +1,4 @@
-"""Live transcript: JarvisEars audio -> on-device speech-to-text.
+"""Live transcript: audio from the Jarvis app -> on-device speech-to-text.
 
 ``jarvis listen`` prints one line per finished sentence, labelled Them (system
 audio) or You (microphone), and saves the same lines to a transcript file.
@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import os
 import socket
 import struct
 import subprocess
@@ -32,7 +33,8 @@ from parakeet_mlx.audio import get_logmel
 
 MODEL = "mlx-community/parakeet-tdt-0.6b-v2"
 SAMPLE_RATE = 16_000
-APP = Path(__file__).resolve().parent.parent / "ears" / "build" / "JarvisEars.app"
+APP = Path(__file__).resolve().parent.parent / "app" / "build" / "Jarvis.app"
+HELPER_ENV = "JARVIS_HELPER"  # set by the Jarvis app: the path of its own program
 HEADER = struct.Struct("<2sBBI")
 SOURCES = {0: "system", 1: "mic"}
 STATUS = 2
@@ -61,7 +63,12 @@ def load_model():
 
 
 class HelperAudio:
-    """Starts JarvisEars and collects the audio it sends, per source."""
+    """Starts the audio helper and collects the audio it sends, per source.
+
+    Under the Jarvis app the helper runs as a child, so macOS counts its
+    microphone and system-audio use as the app's. From a terminal it is opened
+    as an app of its own, for the same reason.
+    """
 
     def __init__(self) -> None:
         self.pending: dict[str, collections.deque] = {
@@ -70,11 +77,22 @@ class HelperAudio:
         self.alive = True
         self.last_packet = time.monotonic()
         self.waiting_for_permission = False
+        self.child: subprocess.Popen | None = None
         server = socket.create_server(("127.0.0.1", 0))
         port = server.getsockname()[1]
-        subprocess.run(["open", "-n", str(APP), "--args", "--port", str(port)], check=True)
+        helper = os.environ.get(HELPER_ENV)
+        if helper:
+            self.child = subprocess.Popen([helper, "--port", str(port)], stdin=subprocess.DEVNULL)
+        else:
+            subprocess.run(["open", "-n", str(APP), "--args", "--port", str(port)], check=True)
         server.settimeout(20)
-        self.conn, _ = server.accept()
+        try:
+            self.conn, _ = server.accept()
+        except TimeoutError:
+            self._stop_child()
+            raise RuntimeError("The audio helper did not start.") from None
+        finally:
+            server.close()
         threading.Thread(target=self._read, daemon=True).start()
 
     def _receive(self, count: int) -> bytes | None:
@@ -126,7 +144,17 @@ class HelperAudio:
         return [queue.popleft() for _ in range(len(queue))]
 
     def close(self) -> None:
-        self.conn.close()
+        self.conn.close()  # the helper exits when its connection closes
+        self._stop_child()
+
+    def _stop_child(self) -> None:
+        if self.child is None:
+            return
+        try:
+            self.child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.child.terminate()
+        self.child = None
 
 
 class WavAudio:
@@ -310,7 +338,8 @@ def run(args) -> int:
     transcript: on_sentence(speaker, text) and on_partial(speaker, text) are
     called from this thread, on_level(source, level) reports loudness from 0
     to 1 about ten times a second, stop is a threading.Event that ends the run, and
-    quiet turns off the printed lines and figures.
+    quiet turns off the printed lines and figures. echo_guard mutes the microphone
+    while the other side is talking; it is True, False or a function returning either.
     """
     on_sentence = getattr(args, "on_sentence", None)
     on_partial = getattr(args, "on_partial", None)
@@ -328,7 +357,9 @@ def run(args) -> int:
     gates = {"system": Gate(floor=0.0008), "mic": Gate(floor=0.006)}
     audio = WavAudio(args.wav, poll_seconds) if args.wav else HelperAudio()
 
+    # True, False, or a function to ask each time: headphones can be plugged in mid-call.
     echo_guard = getattr(args, "echo_guard", True)
+    guarding = echo_guard if callable(echo_guard) else (lambda: echo_guard)
     started = time.monotonic()
     spoken = False
     shown_partial = dict.fromkeys(sources, "")
@@ -366,7 +397,7 @@ def run(args) -> int:
                     if on_level and len(chunk):
                         level = float(np.sqrt(np.mean(np.square(chunk, dtype=np.float64))))
                         loudest = level if loudest is None else max(loudest, level)
-                    if source == "mic" and echo_guard and gates["system"].is_open:
+                    if source == "mic" and gates["system"].is_open and guarding():
                         # While the other side is talking, the microphone mostly
                         # hears the speakers, which would come out as garbled "You" lines.
                         chunk = np.zeros_like(chunk)
@@ -406,5 +437,8 @@ def run(args) -> int:
         }
     if not quiet:
         print(json.dumps(stats, indent=2))
+    # A long-running service listens to many calls: hand the model's memory back between them.
+    del texts, model
+    mx.clear_cache()
     return 0
 

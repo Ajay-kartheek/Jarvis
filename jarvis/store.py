@@ -23,6 +23,7 @@ SCHEMA_VERSION = 1
 KINDS = ("mail", "event", "file")
 # Files indexed from folders on this Mac are stored under this pseudo-account.
 LOCAL_ACCOUNT = "local"
+NOTE_PREFIX = "note:"  # source_id of a meeting note Jarvis wrote
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -454,6 +455,13 @@ class Store:
                 self._delete_doc(account, "mail", message_id)
         return removed
 
+    def gmail_get(self, account: str, message_id: str) -> sqlite3.Row | None:
+        return self.db.execute(
+            "SELECT id, thread_id, subject, sender, recipients, cc, headers, internal_date "
+            "FROM gmail_messages WHERE account=? AND id=?",
+            (account, message_id),
+        ).fetchone()
+
     def mail_thread(self, account: str, message_id: str) -> list[sqlite3.Row]:
         """Other stored messages in the same thread, oldest first."""
         return self.db.execute(
@@ -814,6 +822,39 @@ class Store:
             ).rowcount
             self._delete_doc(LOCAL_ACCOUNT, "file", f"{project}:{path}")
         return removed
+
+    # --- notes Jarvis writes itself ----------------------------------------
+
+    def note_upsert(self, path: str, title: str, body: str, ts: int, project: str | None) -> None:
+        """Index a meeting note so later questions and briefs can find it.
+
+        Notes are kept apart from ``local_files``: a folder sync removes what is
+        no longer in a project's folders, and notes do not live in one.
+        """
+        source_id = f"{NOTE_PREFIX}{path}"
+        with self._tx():
+            self._upsert_doc(LOCAL_ACCOUNT, "file", source_id, title, body, "", ts, f"file://{path}")
+            self.db.execute(
+                "UPDATE docs SET project=? WHERE account=? AND kind='file' AND source_id=?",
+                (project, LOCAL_ACCOUNT, source_id),
+            )
+
+    def notes(self, project: str | None = None, limit: int = 10) -> list[Doc]:
+        """Meeting notes, newest first."""
+        where, args = "", [LOCAL_ACCOUNT, f"{NOTE_PREFIX}%"]
+        if project is not None:
+            where = " AND project=?"
+            args.append(project)
+        rows = self.db.execute(
+            "SELECT doc_id, account, kind, source_id, title, body, people, ts, link, project FROM docs "
+            f"WHERE account=? AND kind='file' AND source_id LIKE ?{where} ORDER BY ts DESC LIMIT ?",
+            [*args, limit],
+        ).fetchall()
+        return [Doc(**dict(row)) for row in rows]
+
+    def note_delete(self, path: str) -> None:
+        with self._tx():
+            self._delete_doc(LOCAL_ACCOUNT, "file", f"{NOTE_PREFIX}{path}")
 
     # --- status ------------------------------------------------------------
 

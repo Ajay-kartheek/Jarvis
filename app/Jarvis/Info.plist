@@ -3,23 +3,34 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleExecutable</key>
-	<string>JarvisEars</string>
+	<string>Jarvis</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.ajay.jarvis.ears</string>
+	<string>com.ajay.jarvis</string>
 	<key>CFBundleName</key>
-	<string>JarvisEars</string>
+	<string>Jarvis</string>
 	<key>CFBundleDisplayName</key>
-	<string>Jarvis Ears</string>
+	<string>Jarvis</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>0.2.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.2</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Jarvis transcribes what you say in meetings. The audio stays on this Mac.</string>
 	<key>NSAudioCaptureUsageDescription</key>

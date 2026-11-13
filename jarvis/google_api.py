@@ -32,6 +32,7 @@ GMAIL_LIST_COST = 5
 GMAIL_GET_COST = 50
 GMAIL_HISTORY_COST = 2
 GMAIL_PROFILE_COST = 1
+GMAIL_DRAFT_COST = 10
 GMAIL_BATCH_SIZE = 15
 
 DRIVE_FILE_FIELDS = (
@@ -157,6 +158,16 @@ class GmailApi:
             )
         batch.execute()
         return outcome
+
+    def create_draft(self, raw: str, thread_id: str | None = None) -> dict:
+        """Save a draft: the one change Jarvis makes in Google. Nothing is delivered."""
+        message = {"raw": raw}
+        if thread_id:
+            message["threadId"] = thread_id
+        self._limiter.acquire(GMAIL_DRAFT_COST)
+        return call_with_retry(
+            lambda: self._svc.users().drafts().create(userId="me", body={"message": message}).execute()
+        )
 
     def history(self, start_history_id: str, page_token: str | None = None) -> dict:
         self._limiter.acquire(GMAIL_HISTORY_COST)

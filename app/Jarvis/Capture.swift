@@ -1,4 +1,4 @@
-// JarvisEars
+// The audio helper
 //
 // Captures the two sides of a call on this Mac and streams them to the Jarvis
 // Python process as 16 kHz mono float32 PCM over a local TCP socket:
@@ -10,7 +10,7 @@
 // The tap plus tap-only aggregate device recipe follows audiotee
 // (https://github.com/makeusabrew/audiotee, MIT).
 //
-// Usage: JarvisEars --port <tcp port on 127.0.0.1> [--no-mic] [--no-system]
+// Usage: Jarvis --port <tcp port on 127.0.0.1> [--no-mic] [--no-system]
 
 import AVFoundation
 import AudioToolbox
@@ -317,7 +317,7 @@ final class SystemAudioTap {
   private func build(pairWithOutputDevice: Bool) throws {
     // A mono mix of everything every other process plays.
     let description = CATapDescription()
-    description.name = "JarvisEars"
+    description.name = "Jarvis"
     description.processes = []
     description.isExclusive = true  // "all processes except the listed ones"
     description.isPrivate = true
@@ -352,7 +352,7 @@ final class SystemAudioTap {
       }, "Reading the tap identifier")
 
     var aggregate: [String: Any] = [
-      kAudioAggregateDeviceNameKey: "JarvisEars",
+      kAudioAggregateDeviceNameKey: "Jarvis",
       kAudioAggregateDeviceUIDKey: UUID().uuidString,
       kAudioAggregateDeviceIsPrivateKey: true,
       kAudioAggregateDeviceIsStackedKey: false,
@@ -576,7 +576,7 @@ func microphoneAllowed() -> Bool {
   }
 }
 
-// MARK: - Main
+// MARK: - Helper mode
 
 func argumentValue(_ name: String) -> String? {
   let arguments = CommandLine.arguments
@@ -584,83 +584,84 @@ func argumentValue(_ name: String) -> String? {
   return arguments[index + 1]
 }
 
-guard let portText = argumentValue("--port"), let port = UInt16(portText) else {
-  fputs("usage: JarvisEars --port <tcp port on 127.0.0.1> [--no-mic] [--no-system]\n", stderr)
-  exit(2)
-}
+// Signal sources stop working once released, so they are kept here.
+private var helperSignalSources: [DispatchSourceSignal] = []
 
-let link: Link
-do {
-  link = try Link(port: port)
-} catch {
-  fputs("JarvisEars: \(error)\n", stderr)
-  exit(1)
-}
-link.status("hello", ["version": 2, "pid": Int(getpid()), "sample_rate": targetSampleRate])
-
-var systemTap: SystemAudioTap?
-var micCapture: MicCapture?
-
-if !CommandLine.arguments.contains("--no-system") {
-  var allowed = true
-  switch AudioCapturePermission.state() {
-  case .allowed:
-    break
-  case .denied:
-    allowed = false
-  case .unknown:
-    link.status("system_permission_prompt")
-    // nil means the prompt could not be shown; try to start anyway.
-    if let granted = AudioCapturePermission.request() { allowed = granted }
+/// Captures until the socket closes or the process is told to stop.
+func runCaptureHelper(port: UInt16) -> Never {
+  let link: Link
+  do {
+    link = try Link(port: port)
+  } catch {
+    fputs("Jarvis: \(error)\n", stderr)
+    exit(1)
   }
-  if allowed {
-    let tap = SystemAudioTap(link: link)
-    do {
-      try tap.start()
-      systemTap = tap
-    } catch {
-      link.status("system_failed", ["error": "\(error)"])
+  link.status("hello", ["version": 2, "pid": Int(getpid()), "sample_rate": targetSampleRate])
+
+  var systemTap: SystemAudioTap?
+  var micCapture: MicCapture?
+
+  if !CommandLine.arguments.contains("--no-system") {
+    var allowed = true
+    switch AudioCapturePermission.state() {
+    case .allowed:
+      break
+    case .denied:
+      allowed = false
+    case .unknown:
+      link.status("system_permission_prompt")
+      // nil means the prompt could not be shown; try to start anyway.
+      if let granted = AudioCapturePermission.request() { allowed = granted }
     }
-  } else {
-    link.status("system_denied")
-  }
-}
-
-if !CommandLine.arguments.contains("--no-mic") {
-  if microphoneAllowed() {
-    let capture = MicCapture(link: link)
-    do {
-      try capture.start()
-      micCapture = capture
-    } catch {
-      link.status("mic_failed", ["error": "\(error)"])
+    if allowed {
+      let tap = SystemAudioTap(link: link)
+      do {
+        try tap.start()
+        systemTap = tap
+      } catch {
+        link.status("system_failed", ["error": "\(error)"])
+      }
+    } else {
+      link.status("system_denied")
     }
-  } else {
-    link.status("mic_denied")
   }
-}
 
-if systemTap == nil && micCapture == nil {
-  link.status("nothing_started")
-  link.flush()
-  exit(1)
-}
+  if !CommandLine.arguments.contains("--no-mic") {
+    if microphoneAllowed() {
+      let capture = MicCapture(link: link)
+      do {
+        try capture.start()
+        micCapture = capture
+      } catch {
+        link.status("mic_failed", ["error": "\(error)"])
+      }
+    } else {
+      link.status("mic_denied")
+    }
+  }
 
-// Stop cleanly when asked to; a closed socket also ends the process (see Link.send).
-signal(SIGTERM, SIG_IGN)
-signal(SIGINT, SIG_IGN)
-let signalQueue = DispatchQueue(label: "jarvis.ears.signals")
-let signalSources = [SIGTERM, SIGINT].map { number -> DispatchSourceSignal in
-  let source = DispatchSource.makeSignalSource(signal: number, queue: signalQueue)
-  source.setEventHandler {
-    micCapture?.stop()
-    systemTap?.stop()
-    link.status("stopped")
+  if systemTap == nil && micCapture == nil {
+    link.status("nothing_started")
     link.flush()
-    exit(0)
+    exit(1)
   }
-  source.resume()
-  return source
-}
 
-dispatchMain()
+  // Stop cleanly when asked to; a closed socket also ends the process (see Link.send).
+  signal(SIGTERM, SIG_IGN)
+  signal(SIGINT, SIG_IGN)
+  let signalQueue = DispatchQueue(label: "jarvis.ears.signals")
+  helperSignalSources = [SIGTERM, SIGINT].map { number -> DispatchSourceSignal in
+    let source = DispatchSource.makeSignalSource(signal: number, queue: signalQueue)
+    source.setEventHandler {
+      micCapture?.stop()
+      systemTap?.stop()
+      link.status("stopped")
+      link.flush()
+      exit(0)
+    }
+    source.resume()
+    return source
+  }
+
+  dispatchMain()
+}
