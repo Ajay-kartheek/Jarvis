@@ -4,7 +4,7 @@ A part of Jarvis that wants to do such a thing asks here and waits. The
 question is shown as a card and, in a conversation, said aloud. It is settled
 in exactly two ways, neither of which passes through a model:
 
-- the user presses Approve or Cancel on the card;
+- the user presses Approve, Allow for this task or Cancel on the card;
 - the user's next message is a plain yes or no, typed, or spoken within two
   minutes of the question, while it is the only question open.
 
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 WAIT_SECONDS = 600
 SPOKEN_WITHIN_SECONDS = 120  # a spoken yes counts only this soon after the question
+TASK_SCOPE = "task"  # the second yes button: "Allow for this task"
 
 _FILLER = r"(?:\s*(?:jarvis|please|thanks|thank you))*"
 _YES = re.compile(
@@ -60,7 +61,8 @@ class Approval:
     detail: str
     asked_at: float
     granted: bool | None = None
-    by: str = ""  # "click", "voice", "typed" or "timeout"
+    by: str = ""  # "click", "voice", "typed", "timeout" or "cancelled" (whoever asked went away)
+    scope: str = ""  # TASK_SCOPE when the yes was "Allow for this task"; what that covers is up to whoever asked
 
     def allows(self, kind: str, subject: str) -> bool:
         """True only for a granted approval of this very thing."""
@@ -97,24 +99,29 @@ class Approvals:
             await asyncio.wait_for(asyncio.shield(future), timeout=wait)
         except asyncio.TimeoutError:
             self._settle(approval.id, False, "timeout")
+        except asyncio.CancelledError:
+            self._settle(approval.id, False, "cancelled")  # a stopped task must not leave its question on screen
+            raise
         return approval
 
-    def _settle(self, approval_id: str, granted: bool, by: str) -> Approval | None:
+    def _settle(self, approval_id: str, granted: bool, by: str, scope: str = "") -> Approval | None:
         entry = self._open.pop(approval_id, None)
         if entry is None:
             return None
         approval, future = entry
         approval.granted, approval.by = granted, by
+        approval.scope = scope if granted else ""
         if not future.done():
             future.set_result(granted)
         self.runtime.drop_card(f"card-{approval.id}")
-        self.runtime.record("approval", f"{'Approved' if granted else 'Declined'} ({by}): {approval.title}")
+        for_task = " for this task" if approval.scope else ""
+        self.runtime.record("approval", f"{'Approved' if granted else 'Declined'} ({by}{for_task}): {approval.title}")
         self.runtime.publish_state()
         return approval
 
-    def click(self, approval_id: str, approve: bool) -> bool:
-        """The user pressed a button on the card."""
-        return self._settle(approval_id, approve, "click") is not None
+    def click(self, approval_id: str, approve: bool, scope: str = "") -> bool:
+        """The user pressed a button on the card: Approve, Allow for this task (``scope``), or Cancel."""
+        return self._settle(approval_id, approve, "click", scope if scope == TASK_SCOPE else "") is not None
 
     def words(self, text: str, spoken: bool) -> Approval | None:
         """Take the user's message as the answer if it is a plain yes or no to the one open question."""

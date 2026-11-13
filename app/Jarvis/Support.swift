@@ -10,6 +10,10 @@ import Foundation
 ///   SIGHUP   "Open Dashboard" chosen in the status menu
 ///   SIGURG   the dashboard's close button pressed
 ///   SIGINFO  write what the app is doing to the log
+/// and a test page (served by a stand-in for the daemon) can ask, through the page bridge, for
+/// things the real pages cannot: "test_move_panel", "test_press_panel", "test_windows",
+/// "test_close_windows", "test_ax_self", "test_stall_ear", "test_cmd_q", "test_cmd_w",
+/// "test_status_menu", "test_main_menu" and "test_quit_event" (see AppController.testAction).
 /// Other settings only the test copy reads (see `text`, `flag` and `seconds`):
 ///   JARVIS_VOICE_MAX_SECONDS  how long a spoken message may last (120 otherwise)
 ///   JARVIS_INPUT_DEVICE       part of the name of the microphone to use, whatever voice_input says
@@ -18,6 +22,10 @@ import Foundation
 ///   JARVIS_TEST_BLUETOOTH=1   treat the default input as a Bluetooth one
 ///   JARVIS_TEST_NO_BUILTIN=1  pretend this Mac has no built-in microphone
 ///   JARVIS_TEST_NO_OPEN=1     links that would open in the browser are only logged
+///   JARVIS_TEST_QUIT_KEY=1    give Quit its Command-Q key back (the control of the test that it is gone)
+///   JARVIS_FAKE_AUDIO         (any copy) a JSON file standing in for the table of audio users
+///   JARVIS_FAKE_TITLES        a JSON file standing in for the window titles Accessibility gives
+///   JARVIS_TEST_OWN_WINDOWS=1 read this app's own windows, through the real API, as the call's
 /// That way it cannot get in the way of the copy the user relies on.
 enum TestMode {
   static let on = ProcessInfo.processInfo.environment["JARVIS_TEST"] == "1"

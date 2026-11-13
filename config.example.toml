@@ -56,10 +56,14 @@ model = "claude-sonnet-5-5"
 [models.jobs.web]
 model = "claude-sonnet-5-5"
 
-# Optional. Leave these out and Jarvis's own conversation uses the "ask" model
-# and meeting preparation uses the "briefs" model.
+# Optional. Leave these out and Jarvis's own conversation uses the "ask" model,
+# meeting preparation uses the "briefs" model, and work that Jarvis carries out
+# by itself in a folder uses the "research" model.
 # [models.jobs.core]
 # model = "claude-sonnet-5-5"
 #
 # [models.jobs.prep]
 # model = "claude-sonnet-5-5"
+#
+# [models.jobs.work]
+# model = "claude-opus-5-5"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import keyring
 import pytest
@@ -53,3 +54,22 @@ def example_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests read the example settings, never the user's own config.toml."""
     example = Path(__file__).resolve().parent.parent / "config.example.toml"
     monkeypatch.setenv("JARVIS_CONFIG", str(example))
+
+
+@pytest.fixture
+def world(fake_home):
+    """A home folder with a task folder in it, another project folder, and the places that must stay private."""
+    home = fake_home.resolve()
+    folder = home / "Documents" / "Jarvis Work" / "primes"
+    folder.mkdir(parents=True)
+    (folder / "notes.md").write_text("notes")
+    (folder / "primes.py").write_text("print(2)")
+    (folder / ".env").write_text("KEY=1")
+    (folder / ".env.example").write_text("KEY=")
+    (folder / "password_reset.py").write_text("def reset(): ...")
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "config").write_text("Host x")
+    (home / "Documents" / "Atlas").mkdir()
+    (home / "Documents" / "Atlas" / "plan.md").write_text("plan")
+    (folder / "ssh-link").symlink_to(home / ".ssh")
+    return SimpleNamespace(home=home, folder=folder, atlas=home / "Documents" / "Atlas")

@@ -1,9 +1,10 @@
-"""Thin, read-only adapters over the Google APIs.
+"""Thin adapters over the Google APIs, read-only apart from two Gmail calls.
 
 Each adapter exposes the few calls the mirrors need as plain methods, paced
 and retried. The sync logic in ``gmail_sync``, ``calendar_sync`` and
 ``drive_sync`` talks to these and is tested against fakes with the same
-methods. Nothing here writes to Google.
+methods. The only things written to Google are a mail draft (``create_draft``)
+and, after the user's yes for that very draft, its delivery (``send_draft``).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from jarvis.approvals import Approval
 from jarvis.ratelimit import (
     RateLimiter,
     backoff_seconds,
@@ -33,6 +35,8 @@ GMAIL_GET_COST = 50
 GMAIL_HISTORY_COST = 2
 GMAIL_PROFILE_COST = 1
 GMAIL_DRAFT_COST = 10
+GMAIL_DRAFT_GET_COST = 5
+GMAIL_SEND_COST = 100
 GMAIL_BATCH_SIZE = 15
 
 DRIVE_FILE_FIELDS = (
@@ -48,6 +52,10 @@ class HistoryExpired(Exception):
 
 class GmailUnavailable(Exception):
     """Gmail kept refusing fetches after every retry; the sync can be resumed."""
+
+
+class NotApproved(PermissionError):
+    """Mail was not sent: the user has not said yes to this very draft."""
 
 
 class SyncTokenExpired(Exception):
@@ -168,6 +176,21 @@ class GmailApi:
         return call_with_retry(
             lambda: self._svc.users().drafts().create(userId="me", body={"message": message}).execute()
         )
+
+    def get_draft(self, draft_id: str) -> dict:
+        """A saved draft as it is in Gmail now, including anything the user changed in it."""
+        self._limiter.acquire(GMAIL_DRAFT_GET_COST)
+        return call_with_retry(
+            lambda: self._svc.users().drafts().get(userId="me", id=draft_id, format="full").execute()
+        )
+
+    def send_draft(self, draft_id: str, approval: Approval) -> dict:
+        """Deliver a draft. The one call in Jarvis that sends mail, and only with the user's yes for this very draft."""
+        if not approval.allows("send_mail", draft_id):
+            raise NotApproved("The user has not said yes to sending this draft, so it was not sent.")
+        self._limiter.acquire(GMAIL_SEND_COST)
+        # One attempt and no retry: repeating a send that did go through would deliver the mail twice.
+        return self._svc.users().drafts().send(userId="me", body={"id": draft_id}).execute()
 
     def history(self, start_history_id: str, page_token: str | None = None) -> dict:
         self._limiter.acquire(GMAIL_HISTORY_COST)

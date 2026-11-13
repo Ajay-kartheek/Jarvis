@@ -1,10 +1,11 @@
 """Google sign-in for Jarvis: read-only access plus Gmail drafts.
 
-Jarvis may read mail, calendar and Drive, and may create drafts. It must
-never deliver mail. Google has no drafts-only permission (the compose scope
-that allows drafts also allows delivery), so the limit is enforced in this
-code base: no function delivers mail, and ``tests/test_no_send.py`` fails the
-build if one ever appears.
+Jarvis may read mail, calendar and Drive, and may create drafts. It delivers
+mail only when the user has said yes to that very draft. Google has no
+drafts-only permission (the compose scope that allows drafts also allows
+delivery), so the limit is enforced in this code base: the one function that
+delivers mail, ``GmailApi.send_draft``, refuses without that yes, and
+``tests/test_no_send.py`` fails the build if any other way to deliver appears.
 """
 
 from __future__ import annotations

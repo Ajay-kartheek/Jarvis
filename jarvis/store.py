@@ -981,6 +981,12 @@ class Store:
         ).fetchall()
         return [{**dict(row), "meta": json.loads(row["meta"] or "{}")} for row in rows]
 
+    def artifact_get(self, artifact_id: int) -> dict | None:
+        row = self.db.execute(
+            "SELECT id, kind, title, project, path, link, body, meta, ts FROM artifacts WHERE id=?", (artifact_id,)
+        ).fetchone()
+        return {**dict(row), "meta": json.loads(row["meta"] or "{}")} if row else None
+
     def artifact_change(self, artifact_id: int, *, title: str, project: str | None) -> None:
         with self._tx():
             self.db.execute("UPDATE artifacts SET title=?, project=? WHERE id=?", (title, project, artifact_id))

@@ -154,13 +154,23 @@ class HelperAudio:
         self._stop_child()
 
     def _stop_child(self) -> None:
+        """Make sure the helper is gone, and say so: while it lives it holds the microphone and the call's audio."""
         if self.child is None:
             return
+        child, self.child = self.child, None
         try:
-            self.child.wait(timeout=2)
+            child.wait(timeout=2)
+            log.info("audio capture released (the helper left by itself)")
+            return
         except subprocess.TimeoutExpired:
-            self.child.terminate()
-        self.child = None
+            child.terminate()
+        try:
+            child.wait(timeout=3)
+            log.info("audio capture released (the helper had to be told to stop)")
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=3)
+            log.warning("audio capture released only by force: the helper did not stop when asked")
 
 
 class WavAudio:

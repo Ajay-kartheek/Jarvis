@@ -29,7 +29,9 @@ Jarvis is an orb in a small panel. Hold Control+Option+J and talk, or tap it and
 
 ## Limits, on purpose
 
-- Read-only against Google, with one exception: saving a mail draft. It never sends mail and never changes calendar or Drive content. A test in `tests/test_no_send.py` fails the build if code that could do so appears.
+- Read-only against Google, with two exceptions: saving a mail draft, and sending a draft after you have said yes to that very mail. It never sends on its own and never changes calendar or Drive content. A test in `tests/test_no_send.py` fails the build if any other sending or changing call appears.
+- Anything that cannot be undone waits for your yes: a click on the card, or a plain "yes" typed or spoken soon after the question. No model can give that answer for you.
+- Work it does by itself in a folder asks before any command beyond plain reading, before writing outside its folder, and before each web search or fetch.
 - On the Mac it creates new folders and files in ordinary places under your home folder. It never deletes anything and never overwrites a file it did not write.
 - Speech is recognised and spoken on the Mac (Parakeet and Kokoro through MLX). It never speaks while a call is being listened to.
 - Audio is recognised on the Mac and never stored. Transcripts are deleted after the number of days set in `config.toml`.

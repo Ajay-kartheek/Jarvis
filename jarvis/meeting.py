@@ -459,21 +459,76 @@ class Advisor:
 # --- running a meeting -------------------------------------------------------
 
 
-def prepare(store: Store, config: Config, project_name: str | None, now: float) -> Meeting:
+_APP_NAME = re.compile(
+    r"\s*[|\-\u2013\u2014]\s*(Microsoft Teams|Zoom(?: Meeting| Workplace)?|Google Meet|Meet|Webex|Slack|"
+    r"Google Chrome|Safari|Microsoft Edge|Arc|Firefox|Brave)\s*$",
+    re.IGNORECASE,
+)
+# Window titles that say which part of the calling app is open, not what the call is.
+_PLAIN_WINDOWS = frozenset({
+    "", "microsoft teams", "teams", "chat", "calendar", "activity", "calls", "onedrive", "copilot", "meet",
+    "zoom", "zoom workplace", "zoom meeting", "google meet", "new tab", "slack", "webex", "meeting", "call",
+})
+
+
+def window_name(title: str) -> str:
+    """A call window's title without the app's own name on the end."""
+    name = " ".join((title or "").split())
+    while True:
+        shorter = _APP_NAME.sub("", name)
+        if shorter == name:
+            return name
+        name = shorter
+
+
+def titles_agree(window: str, event_title: str) -> bool:
+    """True when a window's title and a calendar entry's title are plainly the same meeting."""
+    seen, wanted = set(keywords(window, 16)), set(keywords(event_title, 16))
+    if not seen or not wanted:
+        return False
+    shared = seen & wanted
+    return len(shared) >= 2 or len(shared) * 2 >= len(wanted)
+
+
+def identify(event: dict | None, titles: list[str] | None) -> tuple[dict | None, str | None]:
+    """Which call this really is: the calendar entry for now, or something else.
+
+    ``titles`` are the titles of the calling app's windows, when the app could
+    read them. The calendar entry stands when a window agrees with it, or when
+    the windows say nothing. Windows that name something else (a person, another
+    meeting) mean this is not the scheduled meeting, even though it is in its
+    slot: the second value is then the name to file the call under.
+    """
+    names = [name for name in (window_name(title) for title in titles or []) if name.lower() not in _PLAIN_WINDOWS]
+    if not names:
+        return event, None
+    if event is not None and any(titles_agree(name, event["title"]) for name in names):
+        return event, None
+    name = re.sub(r"^(call|meeting|chat) with ", "", names[0], flags=re.IGNORECASE)
+    person = len(name.split()) <= 4 and not any(character.isdigit() for character in name)
+    return None, f"Call with {name}" if person else name
+
+
+def prepare(store: Store, config: Config, project_name: str | None, now: float,
+            titles: list[str] | None = None) -> Meeting:
     known = project_registry.load(store, config)
-    event = current_event(store, config.primary_account.email.lower(), now)
+    scheduled = current_event(store, config.primary_account.email.lower(), now)
+    event, other = identify(scheduled, titles)
     if project_name:
         project = project_registry.find(store, project_name, config)
         if project is None:
             raise ValueError(f"There is no project called {project_name}. See: jarvis project list")
-    else:
+    elif event is not None:
         project = guess_project(known, event)
-    title = event["title"] if event else "Unscheduled call"
+    else:  # an unscheduled call: the window may still name an engagement or one of its people
+        project = guess_project(known, {"title": other or "", "people": [other or ""]})
+    title = event["title"] if event else (other or "Unscheduled call")
     return Meeting(title, project, build_brief(store, project, event, now), event)
 
 
 async def run(config: Config, *, project_name: str | None = None, seconds: float | None = None,
               headphones: bool | Callable[[], bool] = False, say: str | None = None,
+              titles: list[str] | None = None,
               out: Path | None = None, emit: Emit | None = None,
               inbox: asyncio.Queue | None = None, wav: Path | None = None) -> None:
     """Listen and advise until ``seconds`` pass or the task is cancelled.
@@ -498,7 +553,7 @@ async def run(config: Config, *, project_name: str | None = None, seconds: float
     answering: asyncio.Task | None = None
     rebinding: asyncio.Task | None = None
     try:
-        meeting = prepare(store, config, project_name, time.time())
+        meeting = prepare(store, config, project_name, time.time(), titles)
 
         def announce() -> None:
             emit({

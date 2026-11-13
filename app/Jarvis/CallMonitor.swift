@@ -35,11 +35,20 @@ final class OwnerResolver {
     return unsafeBitCast(symbol, to: ResponsibleLookup.self)
   }()
 
-  private var known: [pid_t: String] = [:]
+  private var known: [pid_t: (identifier: String, pid: pid_t)] = [:]
 
   func owner(of pid: pid_t, fallback: String) -> String {
+    resolved(pid)?.identifier ?? fallback
+  }
+
+  /// The process number of the app a process belongs to, found the same way.
+  func ownerPid(of pid: pid_t) -> pid_t? {
+    resolved(pid)?.pid
+  }
+
+  private func resolved(_ pid: pid_t) -> (identifier: String, pid: pid_t)? {
     if let found = known[pid] { return found }
-    guard let found = resolve(pid) else { return fallback }
+    guard let found = resolve(pid) else { return nil }
     known[pid] = found
     return found
   }
@@ -49,24 +58,24 @@ final class OwnerResolver {
     known = known.filter { alive.contains($0.key) }
   }
 
-  private func resolve(_ pid: pid_t) -> String? {
+  private func resolve(_ pid: pid_t) -> (identifier: String, pid: pid_t)? {
     if let lookup = OwnerResolver.responsibleLookup {
       let responsible = lookup(pid)
       if responsible > 0,
         let identifier = NSRunningApplication(processIdentifier: responsible)?.bundleIdentifier
       {
-        return identifier
+        return (identifier, responsible)
       }
     }
     // Otherwise walk up the parents to the first real app.
     var current = pid
-    var firstWithIdentifier: String?
+    var firstWithIdentifier: (identifier: String, pid: pid_t)?
     for _ in 0..<12 {
       if let app = NSRunningApplication(processIdentifier: current),
         let identifier = app.bundleIdentifier
       {
-        if app.activationPolicy != .prohibited { return identifier }
-        if firstWithIdentifier == nil { firstWithIdentifier = identifier }
+        if app.activationPolicy != .prohibited { return (identifier, current) }
+        if firstWithIdentifier == nil { firstWithIdentifier = (identifier, current) }
       }
       guard let parent = OwnerResolver.parent(of: current), parent > 1, parent != current else {
         break
@@ -323,6 +332,8 @@ final class CallMonitor {
   var onChange: ((_ active: Bool, _ app: String?) -> Void)?
   private(set) var active = false
   private(set) var app: String?
+  /// The process number of that app, to read its windows; nil when it could not be found.
+  private(set) var appPid: pid_t?
 
   private let owners = OwnerResolver()
   private let ownBundleID = Bundle.main.bundleIdentifier ?? "com.ajay.jarvis"
@@ -351,6 +362,7 @@ final class CallMonitor {
         let ended = app ?? "?"
         active = false
         app = nil
+        appPid = nil
         candidate = nil
         streak = 0
         Log.write("call ended: \(ended)")
@@ -371,6 +383,7 @@ final class CallMonitor {
     if streak >= CallMonitor.pollsToStart {
       active = true
       app = found
+      appPid = owners.ownerPid(of: hit.pid)
       lastHeard = now
       Log.write("call started: \(found) (pid \(hit.pid), \(hit.bundleID))")
       onChange?(true, found)
@@ -393,7 +406,7 @@ final class CallMonitor {
     process.pid == getpid() || process.bundleID == ownBundleID || process.owner == ownBundleID
   }
 
-  private static func readTable(_ path: String) -> [AudioProcess] {
+  static func readTable(_ path: String) -> [AudioProcess] {
     guard let data = FileManager.default.contents(atPath: path),
       let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
     else { return [] }

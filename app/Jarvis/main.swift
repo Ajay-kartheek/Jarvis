@@ -1,10 +1,11 @@
 // Jarvis
 //
-// One program, started in one of three ways:
+// One program, started in one of four ways:
 //   Jarvis                                     the menu-bar app (App.swift)
 //                                              JARVIS_TEST=1 makes it a test copy (see TestMode)
 //   Jarvis --port N [--no-mic] [--no-system]   the audio helper (Capture.swift)
 //   Jarvis --list-audio                        print which processes use audio, then exit
+//   Jarvis --list-windows                      print the window titles of each app using audio
 
 import Foundation
 
@@ -16,6 +17,9 @@ if CommandLine.arguments.contains("--port") {
   runCaptureHelper(port: port)
 } else if CommandLine.arguments.contains("--list-audio") {
   printAudioTable()
+  exit(0)
+} else if CommandLine.arguments.contains("--list-windows") {
+  printWindowTable()
   exit(0)
 } else {
   runApp()

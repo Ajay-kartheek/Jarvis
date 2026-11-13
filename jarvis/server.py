@@ -15,6 +15,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -50,6 +51,7 @@ class AnswerRequest(BaseModel):
 
 class ApprovalRequest(BaseModel):
     approve: bool
+    scope: Literal["task"] | None = None  # "Allow for this task": the yes holds for the rest of that task
 
 
 class SettingsRequest(BaseModel):
@@ -65,12 +67,20 @@ class AutoRequest(BaseModel):
 class CallReport(BaseModel):
     active: bool = False
     app: str | None = None
+    title: str | None = None  # the calling app's front window, when the app may read window titles
+    titles: list[str] = Field(default_factory=list)
 
 
 class AppReport(BaseModel):
     call: CallReport = Field(default_factory=CallReport)
     headphones: bool = False
     permissions: dict[str, str] = Field(default_factory=dict)
+    ear_state: str = "off"
+
+
+class PlayingRequest(BaseModel):
+    id: str
+    playing: bool
 
 
 def _local_origin(origin: str | None) -> bool:
@@ -127,8 +137,25 @@ def create_app(config: Config, *, background: bool = False) -> FastAPI:
 
     @app.post("/api/app")
     async def app_report(body: AppReport) -> dict:
-        await runtime.autopilot.report(body.call.active, body.call.app, body.headphones, body.permissions)
+        titles = [title for title in [body.call.title, *body.call.titles] if title]
+        await runtime.autopilot.report(
+            body.call.active, body.call.app, body.headphones, body.permissions,
+            titles=list(dict.fromkeys(titles)), ear_state=body.ear_state,
+        )
         return runtime.pulse()
+
+    @app.post("/api/voice/playing")
+    async def voice_playing(body: PlayingRequest) -> dict:
+        runtime.speaking(body.id, body.playing)
+        return {"ok": True}
+
+    @app.get("/api/reminders")
+    async def get_reminders() -> list[dict]:
+        with open_store() as store:
+            return [
+                {"id": item["id"], "due": dashboard.iso(item["due_ts"]), "text": item["text"]}
+                for item in store.reminders()
+            ]
 
     @app.post("/api/auto")
     async def set_auto(body: AutoRequest) -> dict:
@@ -227,7 +254,7 @@ def create_app(config: Config, *, background: bool = False) -> FastAPI:
 
     @app.post("/api/approvals/{approval_id}")
     async def settle_approval(approval_id: str, body: ApprovalRequest) -> dict:
-        if not runtime.approvals.click(approval_id, body.approve):
+        if not runtime.approvals.click(approval_id, body.approve, body.scope or ""):
             raise HTTPException(409, "That question is no longer open.")
         return {"ok": True}
 

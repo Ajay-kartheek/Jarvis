@@ -255,13 +255,15 @@ def _route(config: Config, job: str, fallback: str) -> JobRoute:
 
 
 def _options(route: JobRoute, system_prompt: str, **extra) -> ClaudeAgentOptions:
+    # "dontAsk" refuses whatever is not allowed in advance. A session that puts questions to the user
+    # (the work task) passes permission_mode="default" and a can_use_tool callback instead.
+    settings = {"permission_mode": "dontAsk", **extra}
     return ClaudeAgentOptions(
         model=route.model,
         system_prompt=system_prompt,
-        permission_mode="dontAsk",
         setting_sources=[],
         strict_mcp_config=True,
-        **extra,
+        **settings,
     )
 
 
@@ -286,10 +288,21 @@ def web_options(config: Config) -> ClaudeAgentOptions:
     )
 
 
+_STEP_KEYS = ("query", "url", "id", "command", "file_path", "pattern")  # what a tool call was given, most telling first
+
+
 def _describe(block: ToolUseBlock) -> str:
     name = block.name.rsplit("__", 1)[-1]
-    detail = block.input.get("query") or block.input.get("url") or block.input.get("id") or ""
-    return f"{name}: {detail}".strip(": ")
+    detail = next((str(block.input[key]) for key in _STEP_KEYS if block.input.get(key)), "")
+    return f"{name}: {' '.join(detail.split())}".strip(": ")
+
+
+def told_lines(store: Store, engagement: str | None) -> list[str]:
+    """What the user has told Jarvis before, as lines for the start of a task's instructions."""
+    facts = store.facts(engagement, limit=30) if engagement else store.facts(limit=15)
+    if not facts:
+        return []
+    return ["", "WHAT THE USER HAS TOLD YOU BEFORE (trust these over the mail)", *(f"- {fact['text']}" for fact in facts)]
 
 
 async def _run(prompt: str, options: ClaudeAgentOptions, notify: Notify | None) -> str:

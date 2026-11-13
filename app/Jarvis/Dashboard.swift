@@ -23,7 +23,7 @@ final class DashboardController: NSObject, NSWindowDelegate {
     srgbRed: 5 / 255, green: 8 / 255, blue: 13 / 255, alpha: 1)
 
   /// What the page asked the app to do (see PageView.onAction).
-  var onAction: ((String) -> Void)?
+  var onAction: ((_ action: String, _ message: [String: Any]) -> Void)?
   /// The user closed the window.
   var onClose: (() -> Void)?
 
@@ -66,7 +66,7 @@ final class DashboardController: NSObject, NSWindowDelegate {
 
     // The title bar is a real one, above the page, so the page keeps no strip clear.
     page.mark(titleStrip: 0)
-    page.onAction = { [weak self] action in self?.onAction?(action) }
+    page.onAction = { [weak self] action, message in self?.onAction?(action, message) }
     page.onLost = { [weak self] in self?.placeholder.isHidden = false }
     page.onLoaded = { [weak self] title in
       guard let self else { return }
@@ -93,6 +93,10 @@ final class DashboardController: NSObject, NSWindowDelegate {
   }
 
   var isKey: Bool { window.isKeyWindow }
+  var windowNumber: Int { window.windowNumber }
+
+  /// Whether this is the window an event was meant for.
+  func owns(_ other: NSWindow?) -> Bool { other === window }
 
   func update(port: Int, hideFromScreenShare: Bool) {
     window.sharingType = hideFromScreenShare ? .none : .readOnly

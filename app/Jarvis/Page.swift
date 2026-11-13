@@ -8,6 +8,59 @@
 import AppKit
 import WebKit
 
+/// The web view of a page. With `dragsWindow` on (the panel in its small form, which has no title
+/// strip) a press on the page that then moves drags the window; a press that does not move is
+/// an ordinary click, passed to the page whole, so the page still gets it.
+final class PageWebView: WKWebView {
+  var dragsWindow = false
+  /// The mouse moving this far (in points) makes a press into a drag.
+  static let dragThreshold: CGFloat = 4
+  /// Test copy only: where a drag event is on the screen, when the mouse itself is not moving.
+  static var testScreenLocation: ((NSEvent) -> NSPoint)?
+
+  /// A click on the page counts when the window is not the one in front: the panel floats over
+  /// other apps, and its first click must not be spent on making it the key window.
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+  override func mouseDown(with event: NSEvent) {
+    guard dragsWindow, let window else {
+      super.mouseDown(with: event)
+      return
+    }
+    // Where the mouse is on the screen. (Not the event's place in the window, which would shift
+    // as the window moves under it.)
+    func screen(_ event: NSEvent) -> NSPoint {
+      PageWebView.testScreenLocation?(event) ?? NSEvent.mouseLocation
+    }
+    let start = screen(event)
+    let origin = window.frame.origin
+    var dragging = false
+    var released: NSEvent?
+    window.trackEvents(
+      matching: [.leftMouseDragged, .leftMouseUp], timeout: NSEvent.foreverDuration,
+      mode: .eventTracking
+    ) { next, stop in
+      guard let next else {
+        stop.pointee = true
+        return
+      }
+      if next.type == .leftMouseUp {
+        released = next
+        stop.pointee = true
+        return
+      }
+      let here = screen(next)
+      let moved = NSPoint(x: here.x - start.x, y: here.y - start.y)
+      if !dragging && hypot(moved.x, moved.y) >= PageWebView.dragThreshold { dragging = true }
+      if dragging { window.setFrameOrigin(NSPoint(x: origin.x + moved.x, y: origin.y + moved.y)) }
+    }
+    if !dragging {
+      super.mouseDown(with: event)
+      if let released { super.mouseUp(with: released) }
+    }
+  }
+}
+
 final class PageView: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
   private static let bridgeName = "jarvis"
   // Files that run when opened are shown in the Finder instead.
@@ -16,9 +69,10 @@ final class PageView: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
     "workflow", "action", "terminal", "jar", "py", "rb", "pl",
   ]
 
-  let webView: WKWebView
-  /// What the page asked for: hide, show, quit, dashboard, voice_start, voice_stop.
-  var onAction: ((String) -> Void)?
+  let webView: PageWebView
+  /// What the page asked for: hide, show, quit, dashboard, voice_start, voice_stop, size (with
+  /// its message, which carries the mode).
+  var onAction: ((_ action: String, _ message: [String: Any]) -> Void)?
   /// The page is on screen; the argument is its title.
   var onLoaded: ((String) -> Void)?
   /// The page went away and is being fetched again.
@@ -38,7 +92,7 @@ final class PageView: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
     configuration.applicationNameForUserAgent = "Jarvis"
     // Jarvis speaks through the page, and nobody clicks before it does.
     configuration.mediaTypesRequiringUserActionForPlayback = []
-    webView = WKWebView(frame: .zero, configuration: configuration)
+    webView = PageWebView(frame: .zero, configuration: configuration)
     super.init()
     // Whatever is behind the web view shows until the page has drawn itself.
     webView.setValue(false, forKey: "drawsBackground")
@@ -58,14 +112,19 @@ final class PageView: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
     if TestMode.on { Log.write("\(name) page released") }
   }
 
-  /// Tells the page it is inside the app, and how tall the strip at the top is
-  /// that belongs to the window rather than to the page.
-  func mark(titleStrip: Int) {
-    let marker = WKUserScript(
-      source: "document.documentElement.classList.add('jarvis-native');"
-        + "document.documentElement.style.setProperty('--jarvis-titlebar', '\(titleStrip)px');",
-      injectionTime: .atDocumentStart, forMainFrameOnly: true)
-    webView.configuration.userContentController.addUserScript(marker)
+  /// Tells the page it is inside the app, how tall the strip at the top is that belongs to the
+  /// window rather than to the page, and whether the panel is in its small form. It is told at
+  /// once, and again whenever the page is loaded afresh.
+  func mark(titleStrip: Int, mini: Bool = false) {
+    let source =
+      "document.documentElement.classList.add('jarvis-native');"
+      + "document.documentElement.classList.\(mini ? "add" : "remove")('jarvis-mini');"
+      + "document.documentElement.style.setProperty('--jarvis-titlebar', '\(titleStrip)px');"
+    let scripts = webView.configuration.userContentController
+    scripts.removeAllUserScripts()  // this is the only one: the new one replaces the old
+    scripts.addUserScript(
+      WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+    run(source)
   }
 
   /// Lets go of the page for good. The web view holds on to this object until then.
@@ -218,6 +277,6 @@ final class PageView: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
       let action = body["action"] as? String
     else { return }
     if TestMode.on { Log.write("\(name): the page sent \"\(action)\"") }
-    onAction?(action)
+    onAction?(action, body)
   }
 }

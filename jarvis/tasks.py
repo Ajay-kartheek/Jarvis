@@ -1,13 +1,15 @@
 """Work Jarvis does in the background and comes back about.
 
-For now there is one kind: preparing the user for a meeting. A task has its
-own model session, reads the local copy with the same two tools as the
-assistant, may ask the user up to three questions, and delivers a one-page
-preparation sheet. The sheet is saved, indexed, shown as a card and handed to
-the live-call helper when that meeting starts.
-
-The session has no internet access and cannot change anything: its only
+Two kinds. Preparing the user for a meeting: a model session that reads the
+local copy with the same tools as the assistant, may ask the user up to three
+questions, and delivers a one-page preparation sheet, which is saved, indexed,
+shown as a card and handed to the live-call helper when that meeting starts.
+That session has no internet access and cannot change anything: its only
 effects are the questions and the sheet.
+
+Work in a folder (``jarvis/work.py``): a session that reads, writes and runs
+commands in a task folder, with the user's yes for anything risky. It shares
+this module's turn loop, questions and cards; at most two run at once.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from claude_agent_sdk import (
@@ -29,9 +32,10 @@ from claude_agent_sdk import (
     tool,
 )
 
-from jarvis import agents, paths
+from jarvis import agents, paths, work
 from jarvis import projects as project_registry
 from jarvis.store import PREP_PREFIX, Store, open_store
+from jarvis.textutil import clip
 
 if TYPE_CHECKING:
     from jarvis.runtime import Runtime
@@ -43,6 +47,7 @@ QUESTION_ROUNDS = 1
 ANSWER_WAIT_SECONDS = 30 * 60
 PROCEED_BEFORE_MEETING_SECONDS = 8 * 60  # stop waiting for answers this long before the meeting
 TURN_LIMIT = 60
+MAX_WORK = 2  # pieces of work running at once
 ASK_TOOL = "mcp__task__ask_user"
 DELIVER_TOOL = "mcp__task__deliver"
 
@@ -75,6 +80,10 @@ Rules:
 - You cannot reach the internet, send anything or change anything."""
 
 
+class TaskError(RuntimeError):
+    """A task could not be started. The message is safe to show the user."""
+
+
 @dataclass
 class Task:
     id: str
@@ -90,12 +99,15 @@ class Task:
     result: dict | None = None
     started_at: str = ""
     updated_at: str = ""
+    goal: str = ""  # work: what was asked for, in full
+    folder: str = ""  # work: the task folder
 
     def summary(self) -> dict:
         return {
             "id": self.id, "kind": self.kind, "title": self.title, "engagement": self.engagement,
             "status": self.status, "step": self.step, "questions": list(self.questions),
             "started_at": self.started_at, "updated_at": self.updated_at,
+            **({"folder": self.folder} if self.folder else {}),
         }
 
 
@@ -128,11 +140,7 @@ def prep_request(task: Task, store: Store, runtime_config) -> str:
         lines.append("Engagement: not identified. Work from the meeting's title and the people in it.")
     if task.focus:
         lines.append(f"What the user said when asking: {task.focus}")
-    facts = store.facts(task.engagement, limit=30) if task.engagement else store.facts(limit=15)
-    if facts:
-        lines.append("")
-        lines.append("WHAT THE USER HAS TOLD YOU BEFORE (trust these over the mail)")
-        lines.extend(f"- {fact['text']}" for fact in facts)
+    lines.extend(agents.told_lines(store, task.engagement))
     lines.append("")
     lines.append("Prepare the user for this meeting.")
     return "\n".join(lines)
@@ -190,6 +198,36 @@ class Tasks:
         self._runs[task.id] = self.runtime.spawn(self._run_prep(task))
         self._changed(task)
         self.runtime.record("task", f"Started: {task.title}")
+        return task
+
+    def running_work(self) -> list[Task]:
+        return [task for task in self.tasks.values() if task.kind == "work" and task.status in ("working", "waiting")]
+
+    def work_room(self) -> None:
+        """Raises TaskError, with a message to pass on, when two pieces of work are already running."""
+        running = self.running_work()
+        if len(running) >= MAX_WORK:
+            names = "; ".join(f"{task.id} \"{task.title}\"" for task in running)
+            raise TaskError(
+                f"Two pieces of work are already running ({names}). Wait for one to finish, or stop one, before starting another."
+            )
+
+    def start_work(self, goal: str, folder: Path, engagement: str | None) -> Task:
+        """Start a piece of work in ``folder``; it goes on in the background and comes back by itself."""
+        self.work_room()
+        busy = next((task for task in self.running_work() if task.folder == str(folder)), None)
+        if busy is not None:
+            raise TaskError(f"Task {busy.id} is already working in that folder. Wait for it, or stop it first.")
+        self._count += 1
+        title = clip(goal, 60)
+        task = Task(
+            id=f"k{self._count}", kind="work", title=f"Work: {title}", engagement=engagement, goal=goal,
+            folder=str(folder), started_at=now_iso(), updated_at=now_iso(),
+        )
+        self.tasks[task.id] = task
+        self._runs[task.id] = self.runtime.spawn(work.run(self, task, folder))
+        self._changed(task)
+        self.runtime.record("task", f"Started: {task.title} (in {work.shown(folder)})")
         return task
 
     def answer(self, task_id: str, text: str) -> bool:
@@ -263,16 +301,22 @@ class Tasks:
 
         return create_sdk_mcp_server("task", tools=[ask_user, deliver])
 
-    async def _turn(self, client: ClaudeSDKClient, task: Task, prompt: str) -> None:
+    async def _turn(self, client: ClaudeSDKClient, task: Task, prompt: str, *, limit_is_ok: bool = False) -> ResultMessage | None:
+        """One message to the session and everything it does in answer. ``limit_is_ok``: running out of turns is returned, not raised."""
         await client.query(prompt)
+        result = None
         async for message in client.receive_response():
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, ToolUseBlock):
                         task.step = agents._describe(block)[:140]
                         self._changed(task)
-            elif isinstance(message, ResultMessage) and message.is_error:
-                raise agents.AgentError(message.result or f"The preparation stopped: {message.subtype}")
+            elif isinstance(message, ResultMessage):
+                result = message
+                if message.is_error and not (limit_is_ok and message.subtype == "error_max_turns"):
+                    noun = "work" if task.kind == "work" else "preparation"
+                    raise agents.AgentError(message.result or f"The {noun} stopped: {message.subtype}")
+        return result
 
     def _answer_deadline(self, task: Task) -> float:
         """Seconds to wait for the user's answers: not past the point where the sheet is needed."""
@@ -368,10 +412,7 @@ class Tasks:
             "id": card_id, "kind": "questions", "title": task.title, "body": body,
             "task": task.id, "questions": list(task.questions),
         })
-        about = task.title.removeprefix("Prepare: ")
-        count = len(task.questions)
-        lead = f"Before I finish preparing for {about}, {'one question' if count == 1 else f'{count} questions'}. "
-        runtime.say(lead + " ".join(task.questions))
+        runtime.say(_lead(task) + " ".join(task.questions))
         runtime.call_attention()
         try:
             return await asyncio.wait_for(future, timeout=self._answer_deadline(task))
@@ -402,6 +443,15 @@ class Tasks:
         runtime.note(f"The preparation \"{task.title}\" is finished; its sheet is on a card and saved.")
         runtime.say(spoken or f"The preparation for {about} is ready.")
         runtime.call_attention()
+
+
+def _lead(task: Task) -> str:
+    """The sentence that introduces a task's questions when they are read aloud."""
+    count = len(task.questions)
+    number = "one question" if count == 1 else f"{count} questions"
+    if task.kind == "work":
+        return f"The work on {task.title.removeprefix('Work: ')} has {number} for you. "
+    return f"Before I finish preparing for {task.title.removeprefix('Prepare: ')}, {number}. "
 
 
 def _text(text: str) -> dict:

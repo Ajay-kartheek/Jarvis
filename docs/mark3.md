@@ -34,11 +34,17 @@ Card kind `approval` with field `approval: <id>`; `POST /api/approvals/<id> {app
     `~/.claude`, anything named like a credential or `.env`).
   - Write, Edit: allowed inside the task folder and `~/Documents/Jarvis Notes`; anywhere else needs approval.
   - Bash: allowed without asking only for a fixed list of read-only commands (ls, cat, head, tail, wc, grep, rg,
-    find without -delete/-exec, git status/log/diff/show, pwd, which) and for running tests or builds inside the
-    task folder (pytest, npm test, npm run build, uv run pytest, make test). Everything else needs approval, with
-    the exact command shown. An approved command is not remembered: the same command later asks again, unless the
-    user chose "allow for this task" (a second button; `POST /api/approvals/<id> {approve: true, scope: "task"}`).
-  - WebSearch: allowed. WebFetch: the first fetch of each host in a task needs approval.
+    find without -delete/-exec, git status/log/diff/show, pwd, which). Everything else needs approval, with the
+    exact command shown, running tests or builds (pytest, npm test, npm run build, uv run pytest, make test)
+    included: they run code the worker has just written. An approved command is not remembered: the same command
+    later asks again, unless the user chose "allow for this task" (a second button; `POST /api/approvals/<id>
+    {approve: true, scope: "task"}`), which remembers the command's first word (two for git, npm and the like) for
+    that task. A command that is asked only because of a risky flag, or because it runs outside the task folder,
+    is asked every time.
+  - WebSearch and WebFetch: each is put to the user, because the worker can read the user's mail and notes and
+    words in a query or a link can carry them out. A search is an approval of kind `fetch` with the subject
+    `web search`, a fetch one with the host as subject. A plain yes covers that one call; "allow for this task"
+    lets later searches, or later fetches from that host, run.
   - Never, even with approval: `sudo`, writing outside the home folder, reading the secrets above.
 - Progress is the task's `step`; `ask_user` and results work as for preparation tasks. At most two work tasks run
   at once; a task stops after 150 turns or two hours and delivers what it has.

@@ -70,6 +70,14 @@ def cap(text: str, limit: int) -> tuple[str, bool]:
     return text[:limit], True
 
 
+def clip(text: str, limit: int) -> str:
+    """The start of ``text`` as one line, cut at a word and marked with ... when it was longer than ``limit``."""
+    line = " ".join(text.split())
+    if len(line) <= limit:
+        return line
+    return line[:limit].rsplit(" ", 1)[0].rstrip(",.;:") + "..."
+
+
 def strip_data_uris(markdown: str) -> str:
     """Remove embedded base64 images from exported markdown."""
     markdown = _DATA_URI_DEFINITION.sub("", markdown)

@@ -54,7 +54,7 @@ def test_other_web_pages_are_refused(client):
 
 
 def test_the_apps_reports_drive_listening(client):
-    assert client.post("/api/app", json=_report(False)).json() == {"status": "idle", "attention": 0}
+    assert client.post("/api/app", json=_report(False)).json() == {"status": "idle", "attention": 0, "ear": False}
     assert client.get("/api/state").json()["app"] is True
 
     assert client.post("/api/app", json=_report(True)).json()["status"] == "listening"

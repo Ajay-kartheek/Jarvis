@@ -142,7 +142,7 @@ class MeetingController:
         wav = os.environ.get(TEST_WAV_ENV)
         try:
             await live.run(
-                self.runtime.config, project_name=project, out=out,
+                self.runtime.config, project_name=project, out=out, titles=self.runtime.autopilot.call_titles,
                 headphones=self.runtime.autopilot.headphones_now if headphones is None else headphones,
                 emit=self._on_event, inbox=self._inbox, wav=Path(wav) if wav else None,
             )
@@ -193,6 +193,8 @@ class Autopilot:
         self.enabled = enabled
         self.call_active = False
         self.call_app: str | None = None
+        self.call_titles: list[str] = []  # the calling app's window titles, when the app may read them
+        self.ear_state = "off"
         self.headphones = False
         self.permissions: dict[str, str] = {}
         self.last_report = 0.0
@@ -233,13 +235,20 @@ class Autopilot:
             "Turn it on in System Settings > Privacy & Security."
         )
 
-    async def report(self, active: bool, app: str | None, headphones: bool, permissions: dict[str, str]) -> None:
+    async def report(self, active: bool, app: str | None, headphones: bool, permissions: dict[str, str],
+                     titles: list[str] | None = None, ear_state: str = "off") -> None:
         meetings = self.runtime.meeting
         before = self.snapshot()
         self.last_report = time.monotonic()
         began = active and not self.call_active
         ended = self.call_active and not active
         self.call_active, self.call_app = active, (app if active else None)
+        fresh = [title for title in titles or [] if title][:6] if active else []
+        if fresh != self.call_titles:
+            self.call_titles = fresh
+            if fresh:
+                log.info("call windows: %s", " | ".join(fresh))  # to learn what the calling apps name their windows
+        self.ear_state = ear_state
         self.headphones, self.permissions = headphones, dict(permissions)
 
         blocked = self._blocked()
@@ -304,6 +313,7 @@ class Runtime:
         self._spoke_at = 0.0  # when the user last spoke to Jarvis, and when Jarvis last made a sound
         self._sounded_at = 0.0
         self._folders_due = False
+        self._voice_playing = False
         self._auto_prepared: set[str] = set()
         self._load_settings()
 
@@ -347,7 +357,15 @@ class Runtime:
 
     def pulse(self) -> dict:
         """The little the app needs every two seconds."""
-        return {"status": self.meeting.status, "attention": self.attention}
+        return {"status": self.meeting.status, "attention": self.attention, "ear": self.ear_wanted()}
+
+    def ear_wanted(self) -> bool:
+        """Whether the app should keep the microphone open for the wake phrase. Never during a call."""
+        return False  # switched on when the ear is wired in
+
+    def speaking(self, speech_id: str, playing: bool) -> None:
+        """The page says Jarvis's voice started or stopped playing."""
+        self._voice_playing = playing
 
     def publish_state(self) -> None:
         self.hub.publish({"type": "state", **self.state()})

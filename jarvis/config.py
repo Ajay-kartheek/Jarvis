@@ -32,6 +32,7 @@ JOBS = (
 OPTIONAL_JOBS = {
     "core": "ask",  # Jarvis's own conversation
     "prep": "briefs",  # preparing for a meeting
+    "work": "research",  # work carried out in a folder: the longest and hardest job Jarvis does
 }
 
 
