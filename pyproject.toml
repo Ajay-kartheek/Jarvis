@@ -5,16 +5,23 @@ description = "Personal assistant: Google mirror, project files and a live meeti
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "claude-agent-sdk>=0.2.180",
+    "en-core-web-sm",
+    "espeakng-loader>=0.2.4",
     "fastapi>=0.162.5",
     "google-api-python-client>=2.202.0",
     "google-auth-oauthlib>=1.5.0",
     "keyring>=25.7.0",
+    "misaki>=0.9.4",
+    "mlx-audio>=0.6.5",
+    "num2words>=0.5.14",
     "numpy>=2.5.4",
     "openpyxl>=3.1.5",
     "parakeet-mlx>=0.7.0",
+    "phonemizer-fork>=3.3.2",
     "pypdf>=7.0.1",
     "python-docx>=1.2.0",
     "python-pptx>=1.0.2",
+    "spacy>=3.8.18",
     "typer>=0.29.1",
     "uvicorn[standard]>=0.54.0",
 ]
@@ -31,6 +38,9 @@ packages = ["jarvis"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv.sources]
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
 
 [dependency-groups]
 dev = [

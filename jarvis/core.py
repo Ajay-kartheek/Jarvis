@@ -425,6 +425,14 @@ class Core:
         if store is not None:
             store.close()
 
+    async def warm(self) -> None:
+        """Open the conversation ahead of the first message, so that message is answered sooner."""
+        async with self._lock:
+            try:
+                await self._ensure()
+            except Exception:
+                await self._close()  # the message itself will try again and report properly
+
     async def reset(self) -> None:
         """Forget the conversation so far."""
         async with self._lock:

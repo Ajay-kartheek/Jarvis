@@ -425,6 +425,15 @@ class Runtime:
             and _speak_engine() is not None
         )
 
+    def warm_voice(self) -> None:
+        """The user has started talking: get the conversation and the speaking voice ready while they do."""
+        self.spawn(self.core.warm())
+        if self._may_speak():
+            from jarvis import speak
+
+            self._sounded_at = time.monotonic()
+            self.spawn(asyncio.to_thread(speak.warm))
+
     def _speak(self, speech_id: str, seq: int, sentence: str) -> bool:
         """Start turning one sentence into sound and tell the interface where to fetch it."""
         from jarvis import speak
