@@ -46,10 +46,10 @@ TURN_LIMIT = 60
 ASK_TOOL = "mcp__task__ask_user"
 DELIVER_TOOL = "mcp__task__deliver"
 
-PREP_INSTRUCTIONS = f"""You are Jarvis, preparing the user for a meeting. You work from a local copy of their mail, calendar, Drive files, project folders and earlier meeting notes, using the search and read tools.
+PREP_INSTRUCTIONS = f"""You are Jarvis, preparing the user for a meeting. You work from a local copy of their mail, calendar, Drive files, project folders and earlier meeting notes, using the search, read and work_log tools.
 
 Work in this order:
-1. Read what matters: the recent mail of the engagement (search by project, newest first, and read the threads that carry asks, decisions or dates), the notes of earlier meetings, and the documents those refer to. Search more than one way before concluding something is not there.
+1. Read what matters. First what was said: the recent mail of the engagement (search by project, newest first, and read the threads that carry asks, decisions or dates) and the notes of earlier meetings. Then what was done: call work_log for the engagement, since the last meeting with these people, to see what the user has built and changed in its folders, and read the files that show it (a README, a changelog, notes, the documents the mail refers to). The user is often asked about their own recent work, so know it. Search more than one way before concluding something is not there.
 2. Work out what this meeting is for, what the other side is likely to raise, what the user owes them and what they owe the user (with dates), which decisions are open, and which facts must be right.
 3. Look for what you cannot settle from the material: a contradiction (two dates for one thing), something only the user knows (the outcome they want from this call, what they are willing to commit to, whether something they drafted was sent), a promised item you cannot find. The user wants to be asked: whenever an answer would change the sheet, call ask_user once with at most {MAX_QUESTIONS} short questions, most important first, each answerable in one sentence. Then stop: write nothing more and call no other tool. The answers arrive in the next message, and only then do you write the sheet. Skip the questions only for a routine meeting where nothing depends on what the user intends.
 4. Call deliver with the sheet and a spoken summary.
@@ -320,7 +320,12 @@ class Tasks:
                             f"{' / '.join(state['asked'])} Answer: {answer}",
                             task.engagement, source="answer",
                         )
-                        prompt = f"The user answered: {answer}\n\nFinish the preparation and call deliver."
+                        prompt = (
+                            f"The user answered: {answer}\n\n"
+                            "If the answer points at something you have not looked at yet (work they did, something "
+                            "someone asked for, a document), find it first with work_log, search and read. "
+                            "Then finish the preparation and call deliver."
+                        )
                     else:
                         prompt = (
                             "The user has not answered and the sheet is needed now. Go on with sensible "

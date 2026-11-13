@@ -372,3 +372,37 @@ def test_a_reply_is_spoken_sentence_by_sentence_as_it_grows():
     speaker.feed("The rehearsal is on Wednesday. It starts")
     speaker.finish("The rehearsal is on Wednesday. It starts at ten")
     assert runtime.spoken == [(0, "Let me check."), (1, "The rehearsal is on Wednesday."), (2, "It starts at ten")]
+
+
+# --- what was built ------------------------------------------------------------------
+
+
+def test_the_work_log_reads_commits_pending_changes_and_changed_files(store, tmp_path):
+    import subprocess
+
+    from jarvis import worklog
+
+    folder = tmp_path / "Atlas"
+    inner = folder / "service"
+    inner.mkdir(parents=True)
+
+    def git(where, *arguments):
+        subprocess.run(["git", "-C", str(where), "-c", "user.name=T", "-c", "user.email=t@example.com", *arguments],
+                       check=True, capture_output=True)
+
+    git(inner, "init", "--quiet")
+    (inner / "rules.py").write_text("LIMIT = 5\n")
+    git(inner, "add", "rules.py")
+    git(inner, "commit", "--quiet", "-m", "Add the price limit rule")
+    (inner / "notes.md").write_text("draft\n")  # not committed
+
+    project = Project("Atlas", ("Priya",), (str(folder),))
+    assert worklog.repositories(folder) == [inner]
+    store.local_upsert("Atlas", str(inner / "rules.py"), "Atlas/service/rules.py", "LIMIT = 5", 1_900_000_000, 10)
+    text = worklog.report(store, project, datetime(2020, 1, 1))
+    assert "Repository Atlas/service: 1 commits" in text and "Add the price limit rule" in text
+    assert "A rules.py" in text and "?? notes.md" in text
+    assert "Atlas/service/rules.py" in text and "Files changed since then" in text
+
+    quiet = worklog.report(store, Project("Borealis", (), (str(tmp_path / "missing"),)), datetime(2020, 1, 1))
+    assert "is not there right now" in quiet
