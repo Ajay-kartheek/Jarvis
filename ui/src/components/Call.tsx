@@ -1,23 +1,17 @@
+// What the panel shows while a call is being followed: the call's title and clock with its two
+// buttons, the other side's words as they are spoken, the SAY card, and the call's history.
+
 import { type CSSProperties, memo, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import type { AppState, Speaker, Status } from "../api";
-import type { HistoryItem, Model, Suggestion } from "../store";
-import { Frame } from "../components/Frame";
-import { Stopwatch, Ticker } from "../components/Ticker";
-import { Waveform } from "../components/Waveform";
-import { clock, elapsed, hhmm, parseTime, shortDate } from "../format";
+import { elapsed, hhmm, parseTime, shortDate } from "../format";
 import { useNow, useReveal } from "../hooks";
 import { InlineText } from "../markdown";
+import type { HistoryItem, Suggestion } from "../store";
+import { Frame } from "./Frame";
+import { Stopwatch, Ticker } from "./Ticker";
+import { Waveform } from "./Waveform";
 
-interface Props {
-  model: Model;
-  onStart: (project: string | null, headphones: boolean | null) => Promise<void>;
-  onStop: () => Promise<void>;
-  onSuggest: () => void;
-}
-
-const CLIPPED = "tl-clip br-clip border";
-const DROP_IN = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 } };
 const WAITING_LINE: Record<Status, string> = {
   idle: "Audio idle",
   preparing: "Getting ready…",
@@ -26,103 +20,68 @@ const WAITING_LINE: Record<Status, string> = {
 };
 const LONG_REPLY = 220; // characters; beyond this the big text steps down a size
 
-export function Meeting({ model, onStart, onStop, onSuggest }: Props) {
-  const { app, partial, current, history } = model;
-  return (
-    <div className="meeting">
-      <TopBar app={app} onStart={onStart} onStop={onStop} />
-      <LiveLine partial={partial} status={app.status} />
-      <SayCard item={current} />
-      <History items={history} />
-      <button className="btn go" data-augmented-ui={CLIPPED} onClick={onSuggest} disabled={!app.meeting}>
-        Suggest now <kbd>⌘↵</kbd>
-      </button>
-    </div>
-  );
+interface BarProps {
+  app: AppState;
+  onSuggest: () => void;
+  onStop: () => Promise<unknown>;
 }
 
-const TopBar = memo(function TopBar({ app, onStart, onStop }: { app: AppState } & Pick<Props, "onStart" | "onStop">) {
+/** The call's title, how long it has run, and the two things to press. Sits beside the small orb. */
+export const CallBar = memo(function CallBar({ app, onSuggest, onStop }: BarProps) {
   const now = useNow(1000);
-  const [project, setProject] = useState("");
-  const [headphones, setHeadphones] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const { status, meeting, engagements } = app;
-  const active = meeting !== null || status !== "idle"; // "preparing" arrives before the meeting's details do
-  const chosen = engagements.some((e) => e.name === project) ? project : "";
-  const startedAt = meeting ? parseTime(meeting.started_at) : NaN;
-
-  const act = (request: Promise<void>) => {
-    setBusy(true);
-    void request.finally(() => setBusy(false));
-  };
-
+  const [stopping, setStopping] = useState(false);
+  const { meeting, status } = app;
+  const started = meeting ? parseTime(meeting.started_at) : NaN;
   return (
-    <Frame i={0} className="topbar">
-      <div className="row">
-        <Ticker className="clock" text={clock(now)} />
-        <h1 className="title">{meeting?.title ?? (active ? "Starting…" : app.app && app.auto ? "Standing by" : "No meeting")}</h1>
-        <motion.span key={status} className="status" data-status={status} {...DROP_IN}>
-          {status}
+    <motion.div className="callbar" initial={{ opacity: 0, x: 14 }} animate={{ opacity: 1, x: 0 }}>
+      <div className="callbar-top">
+        <motion.span
+          key={status}
+          className="status"
+          data-tone="active"
+          initial={{ opacity: 0, y: -4 }}
+          animate={{ opacity: 1, y: 0 }}
+        >
+          {status === "idle" ? "starting" : status}
         </motion.span>
+        <span className="chip">{meeting?.engagement ?? "No engagement"}</span>
+        {!Number.isNaN(started) && <Ticker className="elapsed" text={elapsed(now - started)} />}
       </div>
-      {active ? (
-        <motion.div key="running" className="row" {...DROP_IN}>
-          <span className="chip">{(meeting ? meeting.engagement : chosen) || "No engagement"}</span>
-          {!Number.isNaN(startedAt) && <Ticker className="elapsed" text={elapsed(now - startedAt)} />}
-          <button className="btn" data-augmented-ui={CLIPPED} onClick={() => act(onStop())} disabled={busy}>
-            Stop
-          </button>
-        </motion.div>
-      ) : (
-        <motion.div key="setup" className="row" {...DROP_IN}>
-          <select
-            className="select"
-            aria-label="Engagement"
-            value={chosen}
-            onChange={(e) => setProject(e.target.value)}
-          >
-            <option value="">No engagement</option>
-            {engagements.map((e) => (
-              <option key={e.name}>{e.name}</option>
-            ))}
-          </select>
-          {/* The app knows what the sound is playing through; only a plain browser has to ask. */}
-          {!app.app && (
-            <label className="toggle">
-              <input type="checkbox" checked={headphones} onChange={(e) => setHeadphones(e.target.checked)} />
-              Headphones
-            </label>
-          )}
-          <button
-            className="btn"
-            data-augmented-ui={CLIPPED}
-            onClick={() => act(onStart(chosen || null, app.app ? null : headphones))}
-            disabled={busy}
-          >
-            {app.app ? "Start now" : "Start"}
-          </button>
-        </motion.div>
-      )}
-      {!active && app.app && <p className="auto-line">{autoLine(app)}</p>}
-    </Frame>
+      <h2 className="title">{meeting?.title ?? "Starting…"}</h2>
+      <div className="callbar-actions">
+        <button
+          className="btn go"
+          data-augmented-ui="tl-clip br-clip border"
+          onClick={onSuggest}
+          disabled={!meeting}
+          title="Ask for something to say right now (Command+Enter)"
+        >
+          Suggest now <kbd>⌘↵</kbd>
+        </button>
+        <button
+          className="btn ghost"
+          data-augmented-ui="tl-clip br-clip border"
+          disabled={stopping}
+          onClick={() => {
+            setStopping(true);
+            void onStop().finally(() => setStopping(false));
+          }}
+        >
+          Stop
+        </button>
+      </div>
+    </motion.div>
   );
 });
 
-/** Tells the user that nothing needs pressing, or why something does. */
-function autoLine(app: AppState): string {
-  if (app.call.active) return "A call is on. Press Start now to listen to it.";
-  if (!app.auto) return "Automatic listening is off. Turn AUTO on, or press Start now.";
-  return "Listening starts by itself when a call begins.";
-}
-
 /** The sentence being spoken right now, with the level meter under it. */
-function LiveLine({ partial, status }: { partial: Record<Speaker, string>; status: Status }) {
+export function ThemLine({ partial, status }: { partial: Record<Speaker, string>; status: Status }) {
   const speaker: Speaker = !partial.Them && partial.You ? "You" : "Them";
   const text = partial[speaker];
   return (
-    <Frame i={1} className="live">
+    <Frame i={1} className="them">
       <div className="label">{speaker} · live</div>
-      <p className="live-text" data-empty={!text || undefined}>
+      <p className="them-text" data-empty={!text || undefined}>
         {text || WAITING_LINE[status]}
       </p>
       <Waveform />
@@ -148,7 +107,7 @@ function splitAlso(text: string, streaming: boolean): [main: string, also: strin
   return [lines.join("\n").trim(), ""];
 }
 
-const SayCard = memo(function SayCard({ item }: { item: Suggestion | null }) {
+export const SayCard = memo(function SayCard({ item }: { item: Suggestion | null }) {
   const phase = item?.phase ?? "empty";
   const [main, also] = splitAlso(item?.text ?? "", phase === "streaming");
   const total = main.length + also.length;
@@ -176,7 +135,7 @@ const SayCard = memo(function SayCard({ item }: { item: Suggestion | null }) {
           {item && pending && <Stopwatch since={item.since} />}
           {item && !pending && item.seconds != null && <span className="took">{item.seconds.toFixed(1)}s</span>}
         </div>
-        {phase === "empty" && <p className="quiet">Standing by. Replies appear here during a meeting.</p>}
+        {phase === "empty" && <p className="quiet">Standing by. Replies appear here during a call.</p>}
         {phase === "skipped" && <p className="quiet">No reply needed.</p>}
         {phase === "thinking" && <div className="thinking">Working on it</div>}
         {total > 0 && (
@@ -216,12 +175,12 @@ const SayCard = memo(function SayCard({ item }: { item: Suggestion | null }) {
   );
 });
 
-/** Earlier replies and transcript lines, newest first. */
-const History = memo(function History({ items }: { items: HistoryItem[] }) {
+/** Earlier replies and transcript lines of this call, newest first. */
+export const CallHistory = memo(function CallHistory({ items }: { items: HistoryItem[] }) {
+  if (items.length === 0) return null;
   return (
     <Frame i={3} className="history">
-      <div className="label">History</div>
-      {items.length === 0 && <p className="quiet">Nothing yet.</p>}
+      <div className="label">This call</div>
       <ol className="history-list">
         <AnimatePresence initial={false}>
           {items.map((entry) => (

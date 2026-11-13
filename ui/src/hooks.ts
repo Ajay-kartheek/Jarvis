@@ -11,6 +11,37 @@ export function useNow(step = 1000): number {
   return tick * step;
 }
 
+/**
+ * True for `ms` after the local clock time `since`, then false. `null` is false. It re-renders once,
+ * when the time runs out, so a line that lingers for a few seconds does not need a ticking clock.
+ */
+export function useWhile(since: number | null, ms: number): boolean {
+  const [, expire] = useState(0);
+  useEffect(() => {
+    if (since === null) return;
+    const left = since + ms - Date.now();
+    if (left <= 0) return;
+    const timer = setTimeout(() => expire((n) => n + 1), left + 20);
+    return () => clearTimeout(timer);
+  }, [since, ms]);
+  return since !== null && Date.now() - since < ms;
+}
+
+/**
+ * Motion props for something that is swapped for another in place: the new one fades and slides in, the
+ * old one fades out first. With reduced motion it is only the swap, and nothing waits for an animation
+ * to finish before the new one shows.
+ */
+export function useSwap(shift = 8) {
+  const reduced = useReducedMotion();
+  if (reduced) return { initial: false as const, animate: { opacity: 1, y: 0 } };
+  return {
+    initial: { opacity: 0, y: shift },
+    animate: { opacity: 1, y: 0 },
+    exit: { opacity: 0, y: -shift * 0.75, transition: { duration: 0.12 } },
+  };
+}
+
 interface RevealOptions {
   /** Slowest typing speed, in characters a second. */
   cps?: number;
@@ -52,4 +83,22 @@ export function useReveal(
 
   if (reduced) return total;
   return shown.key === key ? Math.min(shown.n, total) : 0;
+}
+
+/**
+ * Whether the content of `ref` is taller than `limit` px. It follows the element as it is resized, so a
+ * window made narrower, which wraps the text onto more lines, turns it on.
+ */
+export function useTallerThan(limit: number): [ref: (element: HTMLElement | null) => void, taller: boolean] {
+  const [element, setElement] = useState<HTMLElement | null>(null);
+  const [taller, setTaller] = useState(false);
+  useEffect(() => {
+    if (!element) return;
+    const check = () => setTaller(element.scrollHeight > limit + 4);
+    check();
+    const watch = new ResizeObserver(check);
+    watch.observe(element);
+    return () => watch.disconnect();
+  }, [element, limit]);
+  return [setElement, taller];
 }

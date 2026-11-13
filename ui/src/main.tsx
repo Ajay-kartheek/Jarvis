@@ -8,7 +8,10 @@ import "@fontsource/jetbrains-mono/latin-500.css";
 import "augmented-ui/augmented-ui.min.css";
 import "./styles.css";
 import App from "./App";
+import { VIEW } from "./bridge";
 import { Guard } from "./components/Guard";
+
+document.documentElement.dataset.view = VIEW; // the stylesheet lets the dashboard scroll and keeps the orb still
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

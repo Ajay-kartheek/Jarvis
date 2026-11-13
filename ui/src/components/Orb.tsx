@@ -1,12 +1,11 @@
 // The assistant's orb: a cloud of points on a sphere inside slowly turning ring arcs.
-// Default export so the 3D library loads only when a screen that shows the orb is opened.
+// Default export so the 3D library loads apart from the rest of the page.
 
 import { memo, useEffect, useMemo, useRef } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { useReducedMotion } from "motion/react";
 import { AdditiveBlending, Color, type Group } from "three";
-
-export type OrbState = "idle" | "listening" | "thinking" | "speaking";
+import { type OrbState, drive } from "./orbState";
 
 const FPS = 30;
 const POINTS = 1400;
@@ -26,6 +25,7 @@ const LOOK: Record<OrbState, Look> = {
   listening: { turn: 0.25, flow: 1.2, amp: 0.07, freq: 2.8, glow: 0.8, rings: 0.5 },
   thinking: { turn: 1.1, flow: 3.2, amp: 0.05, freq: 6.5, glow: 0.9, rings: 2.6 },
   speaking: { turn: 0.3, flow: 2.2, amp: 0.16, freq: 3.4, glow: 1, rings: 0.8 },
+  call: { turn: 0.1, flow: 0.9, amp: 0.045, freq: 2.4, glow: 0.7, rings: 0.35 },
 };
 
 /** Ring arcs as [radius, arc length, tilt x, tilt y]. */
@@ -85,7 +85,7 @@ function Scene({ state, still }: { state: OrbState; still: boolean }) {
   const cloud = useRef<Group>(null);
   const rings = useRef<Group>(null);
   const invalidate = useThree((three) => three.invalidate);
-  const look = useRef({ ...LOOK.idle, phase: 0, angle: 0, ringAngle: 0 });
+  const look = useRef({ ...LOOK.idle, phase: 0, angle: 0, ringAngle: 0, drive: 0 });
   const { positions, seeds } = useMemo(spherePoints, []);
   // Built once: the renderer makes a new material whenever the object passed as `args` changes.
   const shader = useMemo(
@@ -143,15 +143,20 @@ function Scene({ state, still }: { state: OrbState; still: boolean }) {
       now.angle += dt * now.turn;
       now.ringAngle += dt * now.rings;
     }
-    // Speech rhythm: while speaking, the ripple swells and settles instead of holding one height.
-    const voice =
-      state === "speaking" && !still ? 0.55 + 0.45 * Math.sin(now.phase * 3.1) * Math.sin(now.phase * 1.3) : 1;
+    // A real sound moves the orb directly: it swells and brightens with the loudness.
+    now.drive += ((still ? 0 : drive(state)) - now.drive) * (1 - Math.exp(-16 * dt));
+    // Speech rhythm for a reply that is only shown, not spoken: the ripple swells and settles by itself.
+    const silent = state === "speaking" && !still && now.drive < 0.02;
+    const rhythm = silent ? 0.55 + 0.45 * Math.sin(now.phase * 3.1) * Math.sin(now.phase * 1.3) : 1;
     uniforms.uPhase.value = now.phase;
-    uniforms.uAmp.value = now.amp * voice;
+    uniforms.uAmp.value = now.amp * rhythm + now.drive * 0.22;
     uniforms.uFreq.value = now.freq;
-    uniforms.uGlow.value = now.glow;
+    uniforms.uGlow.value = now.glow + now.drive * 0.35;
     uniforms.uSize.value = size.height * viewport.dpr * POINT_SCALE;
-    if (cloud.current) cloud.current.rotation.y = now.angle;
+    if (cloud.current) {
+      cloud.current.rotation.y = now.angle;
+      cloud.current.scale.setScalar(1 + now.drive * 0.07);
+    }
     rings.current?.children.forEach((ring, i) => {
       ring.rotation.z = now.ringAngle * (i % 2 ? -1 : 1) * (1 + i * 0.4);
     });
@@ -187,12 +192,15 @@ function Scene({ state, still }: { state: OrbState; still: boolean }) {
 const CAMERA = { position: [0, 0, 4.8] as [number, number, number], fov: 40 };
 const RENDERER = { alpha: true, antialias: true, powerPreference: "low-power" as const };
 const FILL = { position: "absolute", inset: 0 } as const;
+// Size the canvas by its layout box, not by its bounding box: a transform on the way in (the panel's
+// entrance, a state change) would otherwise be measured as the size and leave the scene small and off centre.
+const RESIZE = { scroll: true, debounce: { scroll: 50, resize: 0 }, offsetSize: true };
 
 /** Memoised: the screen around it re-renders often, and the canvas should only hear about state changes. */
 export default memo(function Orb({ state }: { state: OrbState }) {
   const still = Boolean(useReducedMotion());
   return (
-    <Canvas flat frameloop="demand" dpr={[1, 2]} camera={CAMERA} gl={RENDERER} style={FILL}>
+    <Canvas flat frameloop="demand" dpr={[1, 2]} camera={CAMERA} gl={RENDERER} resize={RESIZE} style={FILL}>
       <Scene state={state} still={still} />
     </Canvas>
   );

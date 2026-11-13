@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { useReducedMotion } from "motion/react";
-import { levels } from "../store";
+import { levels } from "../levels";
 
 const BARS = 64;
 const FRAME_MS = 1000 / 30;

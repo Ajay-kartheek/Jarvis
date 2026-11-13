@@ -17,15 +17,63 @@ export interface MeetingInfo {
 }
 
 export interface Notice {
-  key: string; // "signin" and "permissions" are the ones the interface knows how to act on
+  key: string; // "signin" is the one the interface knows how to act on
   text: string;
+}
+
+export interface Settings {
+  /** Listening starts by itself when a call does. */
+  auto: boolean;
+  /** A spoken message gets a spoken reply. */
+  speak: boolean;
+  /** Jarvis prepares for client meetings ahead of time without being asked. */
+  auto_prep: boolean;
+}
+
+export type CardKind = "note" | "prep" | "questions" | "draft" | "file";
+
+/** Something Jarvis puts in front of the user: a result, a draft, or questions it needs answered. */
+export interface Card {
+  id: string;
+  kind: CardKind;
+  title: string;
+  body: string; // markdown
+  at: string;
+  task?: string | null;
+  questions?: string[];
+  link?: string | null;
+  path?: string | null;
+}
+
+export type TaskStatus = "working" | "waiting" | "done" | "failed" | "stopped";
+
+/** Work Jarvis does in the background, such as preparing for a meeting. */
+export interface Task {
+  id: string;
+  kind: "prep" | "work";
+  title: string;
+  engagement: string | null;
+  status: TaskStatus;
+  step: string; // the latest thing it did
+  questions: string[]; // what it is waiting to hear, when status is "waiting"
+  started_at: string;
+  updated_at: string;
+}
+
+/** Still going: working, or waiting for an answer. */
+export const isRunning = (task: Task) => task.status === "working" || task.status === "waiting";
+
+export interface Line {
+  role: "user" | "jarvis";
+  text: string;
+  at: string;
 }
 
 export interface AppState {
   status: Status;
   meeting: MeetingInfo | null;
   engagements: Engagement[];
-  /** Listening starts by itself when a call does. */
+  /** Mirrors settings.auto; older servers send only this. */
   auto: boolean;
   /** The Jarvis app is running and reporting calls. */
   app: boolean;
@@ -33,6 +81,14 @@ export interface AppState {
   notices: Notice[];
   last_sync: string | null;
   syncing: boolean;
+  /** Jarvis is working on a turn. */
+  busy: boolean;
+  tasks: Task[];
+  cards: Card[]; // newest first
+  conversation: Line[]; // oldest first
+  settings: Settings;
+  /** What this Mac can do: hear the user, and speak. */
+  voice: { hear: boolean; speak: boolean };
 }
 
 export interface Source {
@@ -41,17 +97,11 @@ export interface Source {
   date: string;
 }
 
-export interface SavedDraft {
-  subject: string;
-  to: string[];
-  link: string;
-}
-
-export interface AskReply {
+export interface TalkReply {
+  id: string;
   text: string;
-  web_queries: string[];
+  speak: boolean;
   seconds: number;
-  drafts?: SavedDraft[];
 }
 
 export interface Note {
@@ -83,36 +133,120 @@ export interface Today {
   notes?: Note[];
 }
 
+// --- dashboard data ---
+
+export interface Counts {
+  mail: number;
+  events: number;
+  files: number;
+  notes: number;
+  preps: number;
+  drafts: number;
+  created: number;
+}
+
+/** One place Jarvis reads from, and how its last sync went. */
+export interface SourceStatus {
+  name: string;
+  account: string;
+  last_run: string | null;
+  status: string;
+  detail: string;
+}
+
+export interface Overview {
+  status: Status;
+  last_sync: string | null;
+  syncing: boolean;
+  notices: Notice[];
+  counts: Counts;
+  sources: SourceStatus[];
+  engagements: Engagement[];
+  tasks: Task[];
+}
+
+/** Something Jarvis made and kept: a prep sheet, meeting notes, a brief, a draft, a file. */
+export interface Item {
+  id: string | number;
+  kind: string;
+  title: string;
+  engagement: string | null;
+  at: string | null; // the store can hold a record without a time
+  body?: string | null; // markdown
+  path?: string | null;
+  link?: string | null;
+}
+
+export const LIBRARY_KINDS = ["preps", "notes", "briefs", "drafts", "files"] as const;
+export type LibraryKind = (typeof LIBRARY_KINDS)[number];
+export type Library = Record<LibraryKind, Item[]>;
+
+/** Something the user told Jarvis to remember. */
+export interface Fact {
+  id: string | number;
+  text: string;
+  engagement: string | null;
+  at: string | null;
+}
+
+export interface Activity {
+  at: string | null;
+  kind: string;
+  text: string;
+}
+
 export type ServerMessage =
-  | ({ type: "state" } & AppState)
+  | ({ type: "state" } & Partial<AppState>)
+  // a call being listened to
   | { type: "partial"; speaker: Speaker; text: string }
   | { type: "sentence"; speaker: Speaker; text: string; at: string }
   | { type: "thinking"; id: number; question: string }
   | { type: "suggestion_delta"; id: number; text: string }
   | { type: "suggestion"; id: number; question: string; text: string; sources: Source[]; seconds: number; at: string }
   | { type: "no_suggestion"; id: number }
-  | { type: "level"; source: "system" | "mic"; level: number }
+  | { type: "level"; source: "system" | "mic" | "voice"; level: number }
   | { type: "info"; text: string }
-  | { type: "ask_step"; id?: string; text: string }
-  | { type: "ask_delta"; id?: string; text: string }
   | ({ type: "notes" } & Note)
-  | ({ type: "brief" } & Brief);
+  | ({ type: "brief" } & Brief)
+  // talking to Jarvis
+  | { type: "voice"; phase: "listening" | "partial" | "heard" | "cancelled"; text?: string }
+  | { type: "turn"; id: string; text: string; spoken: boolean; at: string }
+  | { type: "step"; id: string; text: string }
+  | { type: "reply_delta"; id: string; text: string }
+  | { type: "reply"; id: string; text: string; speak: boolean; seconds: number; at: string }
+  | { type: "reply_error"; id: string; text: string }
+  | { type: "say"; id: string; text: string; at: string }
+  | { type: "speech"; id: string; seq: number; text: string; url: string }
+  | { type: "card"; card: Card }
+  | { type: "card_gone"; id: string }
+  | { type: "task"; task: Task };
+
+export type SpeechMessage = Extract<ServerMessage, { type: "speech" }>;
 
 export interface Api {
-  state(): Promise<AppState>;
+  state(): Promise<Partial<AppState>>;
   /** `headphones` null leaves it to the app, which knows what the sound is playing through. */
-  startMeeting(project: string | null, headphones: boolean | null): Promise<AppState>;
-  stopMeeting(): Promise<AppState>;
-  suggest(): Promise<{ ok: true }>;
-  /** `id` comes back on the progress messages for this question. */
-  ask(question: string, id: string): Promise<AskReply>;
-  resetAsk(): Promise<{ ok: true }>;
-  setAuto(enabled: boolean): Promise<AppState>;
-  reconnect(): Promise<{ account: string }>;
+  startMeeting(project: string | null, headphones: boolean | null): Promise<Partial<AppState>>;
+  stopMeeting(): Promise<Partial<AppState>>;
+  suggest(): Promise<unknown>;
+  /** A typed message. `id` comes back on the events for this turn. */
+  talk(text: string, id: string): Promise<TalkReply>;
+  resetTalk(): Promise<unknown>;
+  answerTask(id: string, text: string): Promise<unknown>;
+  stopTask(id: string): Promise<unknown>;
+  dismissCard(id: string): Promise<unknown>;
+  saveSettings(change: Partial<Settings>): Promise<unknown>;
+  reconnect(): Promise<unknown>;
+  syncNow(): Promise<unknown>;
+  overview(): Promise<Overview>;
   today(): Promise<Today>;
+  library(): Promise<Library>;
+  facts(): Promise<Fact[]>;
+  forgetFact(id: string | number): Promise<unknown>;
+  activity(limit: number): Promise<Activity[]>;
 }
 
-async function call<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+async function call<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
@@ -131,16 +265,27 @@ async function call<T>(method: "GET" | "POST", path: string, body?: unknown): Pr
   return (await res.json()) as T;
 }
 
+const seg = encodeURIComponent;
+
 export const rest: Api = {
   state: () => call("GET", "/api/state"),
   startMeeting: (project, headphones) => call("POST", "/api/meeting/start", { project, headphones }),
   stopMeeting: () => call("POST", "/api/meeting/stop"),
   suggest: () => call("POST", "/api/meeting/suggest"),
-  ask: (question, id) => call("POST", "/api/ask", { question, id }),
-  resetAsk: () => call("POST", "/api/ask/reset"),
-  setAuto: (enabled) => call("POST", "/api/auto", { enabled }),
+  talk: (text, id) => call("POST", "/api/talk", { text, spoken: false, id }),
+  resetTalk: () => call("POST", "/api/talk/reset"),
+  answerTask: (id, text) => call("POST", `/api/tasks/${seg(id)}/answer`, { text }),
+  stopTask: (id) => call("POST", `/api/tasks/${seg(id)}/stop`),
+  dismissCard: (id) => call("POST", `/api/cards/${seg(id)}/dismiss`),
+  saveSettings: (change) => call("POST", "/api/settings", change),
   reconnect: () => call("POST", "/api/reconnect"),
+  syncNow: () => call("POST", "/api/sync"),
+  overview: () => call("GET", "/api/overview"),
   today: () => call("GET", "/api/today"),
+  library: () => call("GET", "/api/library"),
+  facts: () => call("GET", "/api/facts"),
+  forgetFact: (id) => call("DELETE", `/api/facts/${seg(String(id))}`),
+  activity: (limit) => call("GET", `/api/activity?limit=${limit}`),
 };
 
 const RETRY_MIN_MS = 500;
