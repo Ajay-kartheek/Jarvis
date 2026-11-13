@@ -1,4 +1,5 @@
-// The last few turns of the conversation, oldest first, the older ones fading.
+// The last few turns of the conversation. The newest exchange is on top, right under the orb, so the
+// answer just given is readable without scrolling however small the panel is; older ones fade below it.
 
 import { useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
@@ -19,8 +20,18 @@ interface Props {
   onForget: () => void;
 }
 
+/** Newest exchange first; inside an exchange the question still comes before its answer. */
+function newestFirst(lines: Line[]): Line[] {
+  const exchanges: Line[][] = [];
+  for (const line of lines) {
+    if (line.role === "user" || exchanges.length === 0) exchanges.push([line]);
+    else exchanges[exchanges.length - 1].push(line);
+  }
+  return exchanges.reverse().flat();
+}
+
 export function Trail({ lines, pending, onForget }: Props) {
-  const shown = lines.slice(-SHOWN);
+  const shown = newestFirst(lines.slice(-SHOWN));
   if (shown.length === 0 && !pending) return null;
   return (
     <Frame i={1} className="trail">
@@ -31,6 +42,7 @@ export function Trail({ lines, pending, onForget }: Props) {
         </button>
       </div>
       <ol className="trail-list">
+        {pending && <Pending turn={pending} />}
         <AnimatePresence initial={false}>
           {shown.map((line, i) => (
             <motion.li
@@ -38,22 +50,22 @@ export function Trail({ lines, pending, onForget }: Props) {
               layout="position"
               className="entry"
               data-who={line.role}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 0.55 + (0.45 * (i + 1)) / shown.length, y: 0 }}
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1 - (0.45 * i) / shown.length, y: 0 }}
               exit={{ opacity: 0 }}
             >
-              <Entry line={line} />
+              <Entry line={line} newest={i < 2} />
             </motion.li>
           ))}
         </AnimatePresence>
-        {pending && <Pending turn={pending} />}
       </ol>
     </Frame>
   );
 }
 
-function Entry({ line }: { line: Line }) {
-  const [open, setOpen] = useState(false);
+/** The newest exchange is never folded: it is what the user is reading. */
+function Entry({ line, newest }: { line: Line; newest: boolean }) {
+  const [open, setOpen] = useState(newest);
   const [measure, tall] = useTallerThan(CLAMP_PX);
   return (
     <>

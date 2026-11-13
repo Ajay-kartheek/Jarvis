@@ -31,6 +31,7 @@ from jarvis.store import LOCAL_ACCOUNT, open_store
 log = logging.getLogger("jarvis")
 
 SYNC_EVERY_SECONDS = 600
+MAIL_EVERY_SECONDS = 150  # new mail and calendar changes are cheap to ask for, so ask often
 SYNC_FRESH_FOR_BRIEF_SECONDS = 900
 FIRST_SYNC_AFTER_SECONDS = 15
 DAILY_CHECK_SECONDS = 300
@@ -531,8 +532,23 @@ class Runtime:
         task.add_done_callback(self._tasks.discard)
         return task
 
+    def restore_cards(self) -> None:
+        """After a restart, put today's preparation sheets back under the orb: the user may be about to need them."""
+        start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+        with open_store() as store:
+            sheets = store.artifacts("prep", since=start, limit=3)
+        for sheet in reversed(sheets):  # the newest ends up on top
+            meeting = sheet["meta"].get("meeting") or {}
+            if meeting.get("end") and datetime.fromisoformat(meeting["end"]).timestamp() < time.time():
+                continue  # that meeting is over
+            self.show_card({
+                "id": f"p-{sheet['id']}", "kind": "prep", "title": f"Preparation: {sheet['title']}",
+                "body": sheet["body"], "path": sheet["path"],
+            })
+
     def start_background(self) -> None:
         self.load_brief()
+        self.restore_cards()
         self.spawn(_warm_up())
         self.spawn(self._sync_loop())
         self.spawn(self._daily_loop())
@@ -549,12 +565,20 @@ class Runtime:
 
     async def _sync_loop(self) -> None:
         await asyncio.sleep(FIRST_SYNC_AFTER_SECONDS)
+        mail_at = 0.0
         while True:
-            due = time.monotonic() - self._synced_at >= SYNC_EVERY_SECONDS
-            if due and not self.meeting.running:  # a call gets the machine to itself
+            now = time.monotonic()
+            if self.meeting.running:  # a call gets the machine to itself
+                pass
+            elif now - self._synced_at >= SYNC_EVERY_SECONDS:
                 await self.sync_now()
-            elif self._folders_due and not self.meeting.running:
+                mail_at = time.monotonic()
+            elif self._folders_due:
                 await self.sync_now(only="folders")
+            elif now - mail_at >= MAIL_EVERY_SECONDS:
+                mail_at = now
+                await self.sync_now(only="gmail")
+                await self.sync_now(only="calendar")
             await asyncio.sleep(30)
 
     def folders_changed(self) -> None:

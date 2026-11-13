@@ -406,3 +406,18 @@ def test_the_work_log_reads_commits_pending_changes_and_changed_files(store, tmp
 
     quiet = worklog.report(store, Project("Borealis", (), (str(tmp_path / "missing"),)), datetime(2020, 1, 1))
     assert "is not there right now" in quiet
+
+
+def test_todays_preparation_sheets_come_back_after_a_restart(client):
+    runtime = client.runtime
+    soon = datetime.now().astimezone().replace(microsecond=0)
+    over = {"start": "2020-01-05T10:00+00:00", "end": "2020-01-05T10:30+00:00"}
+    ahead = {"start": soon.isoformat(), "end": soon.replace(year=soon.year + 1).isoformat()}
+    with open_store() as store:
+        store.artifact_add("prep", "Atlas weekly", project="Atlas", body="old sheet", meta={"meeting": over})
+        store.artifact_add("prep", "Borealis review", project="Borealis", body="the sheet", meta={"meeting": ahead})
+    runtime.restore_cards()
+    cards = client.get("/api/state").json()["cards"]
+    assert [(card["kind"], card["title"], card["body"]) for card in cards] == [
+        ("prep", "Preparation: Borealis review", "the sheet"),
+    ]

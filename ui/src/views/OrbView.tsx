@@ -104,6 +104,12 @@ export default function OrbView({ jarvis }: { jarvis: Jarvis }) {
     box.scrollTo({ top, behavior: reduced ? "auto" : "smooth" });
   }, [asking, reduced]);
 
+  // A new line in the conversation is shown at the top of the feed: go there, wherever the feed had been scrolled to.
+  const newest = app.conversation.length ? app.conversation[app.conversation.length - 1].at : "";
+  useEffect(() => {
+    feed.current?.scrollTo({ top: 0, behavior: reduced ? "auto" : "smooth" });
+  }, [newest, reduced]);
+
   const pending = turn && (turn.phase === "working" || turn.phase === "streaming") ? turn : null;
   // A call is not the place for yesterday's conversation: it shows only what was said to Jarvis since it began.
   const began = app.meeting ? parseTime(app.meeting.started_at) : NaN;
