@@ -28,6 +28,22 @@ LABEL = "com.ajay.jarvis"
 PROJECT = Path(__file__).resolve().parent.parent
 BUILT_APP = PROJECT / "app" / "build" / "Jarvis.app"
 DEFAULT_PORT = 8765
+# Apps whose use of the microphone counts as a call, as bundle-id prefixes: the
+# usual work tools, and browsers for calls that run in a tab. Personal calling
+# apps (FaceTime, WhatsApp and the like) are left out on purpose.
+CALL_APPS = (
+    "com.microsoft.teams",
+    "us.zoom.xos",
+    "com.cisco.webexmeetingsapp",
+    "com.webex.meetingmanager",
+    "com.tinyspeck.slackmacgap",
+    "com.google.Chrome",
+    "com.apple.Safari",
+    "com.microsoft.edgemac",
+    "company.thebrowser.Browser",
+    "org.mozilla.firefox",
+    "com.brave.Browser",
+)
 
 Progress = Callable[[str], None]
 
@@ -58,6 +74,7 @@ def app_config(port: int) -> dict:
         "daemon": [str(Path(sys.executable).parent / "jarvis"), "daemon", "--port", str(port)],
         "cwd": str(PROJECT),
         "port": port,
+        "call_apps": list(CALL_APPS),
         "hide_from_screen_share": True,
     }
 

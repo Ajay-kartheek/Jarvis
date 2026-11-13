@@ -139,3 +139,5 @@ def test_the_app_is_told_how_to_start_the_service():
     settings = install.app_config(8765)
     assert settings["daemon"][1:] == ["daemon", "--port", "8765"]
     assert settings["daemon"][0].endswith("/jarvis") and settings["port"] == 8765
+    assert "com.microsoft.teams" in settings["call_apps"]
+    assert not any("FaceTime" in app or "WhatsApp" in app for app in settings["call_apps"])  # personal calls stay private
