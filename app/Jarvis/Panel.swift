@@ -1,7 +1,7 @@
 // The floating panel
 //
 // One window that stays above everything, full-screen calls included, and
-// shows the interface the Python daemon serves on 127.0.0.1.
+// shows the orb: the page the Python daemon serves at /?panel=1.
 
 import AppKit
 import WebKit
@@ -12,28 +12,21 @@ final class JarvisPanel: NSPanel {
   override var canBecomeMain: Bool { false }
 }
 
-final class PanelController: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
+final class PanelController: NSObject {
   static let defaultSize = NSSize(width: 460, height: 760)
   static let minimumSize = NSSize(width: 380, height: 480)
   static let edgeMargin: CGFloat = 16
   static let cornerRadius: CGFloat = 14
-  static let frameName = "JarvisPanel"
+  static let frameName = "JarvisPanel\(TestMode.nameSuffix)"
   private static let escapeKey: UInt16 = 53
-  // Files that run when opened are shown in the Finder instead.
-  private static let runnableExtensions: Set<String> = [
-    "app", "command", "sh", "zsh", "bash", "tool", "pkg", "mpkg", "dmg", "scpt", "applescript",
-    "workflow", "action", "terminal", "jar", "py", "rb", "pl",
-  ]
 
-  var onQuit: (() -> Void)?
+  /// What the page asked the app to do (see PageView.onAction).
+  var onAction: ((String) -> Void)?
 
   private let panel: JarvisPanel
-  private let webView: WKWebView
+  private let page: PageView
   private let placeholder = NSTextField(labelWithString: "Starting Jarvis…")
-  private var port: Int
-  private var loaded = false
   private var pendingReason: String?
-  private var retry: DispatchWorkItem?
   private var previousApp: NSRunningApplication?
   private var keyMonitor: Any?
 
@@ -41,14 +34,11 @@ final class PanelController: NSObject, WKNavigationDelegate, WKUIDelegate, WKScr
   var isKey: Bool { panel.isKeyWindow }
 
   init(port: Int, hideFromScreenShare: Bool) {
-    self.port = port
     panel = JarvisPanel(
       contentRect: PanelController.defaultFrame(),
       styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView, .resizable],
       backing: .buffered, defer: false)
-    let configuration = WKWebViewConfiguration()
-    configuration.applicationNameForUserAgent = "Jarvis"
-    webView = WKWebView(frame: .zero, configuration: configuration)
+    page = PageView(name: "panel", query: "panel=1", port: port)
     super.init()
 
     panel.title = "Jarvis"
@@ -93,24 +83,25 @@ final class PanelController: NSObject, WKNavigationDelegate, WKUIDelegate, WKScr
     placeholder.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin, .maxYMargin]
     container.addSubview(placeholder)
 
-    webView.frame = container.bounds
-    webView.autoresizingMask = [.width, .height]
-    webView.setValue(false, forKey: "drawsBackground")
-    webView.underPageBackgroundColor = .clear
-    webView.isInspectable = true
-    webView.navigationDelegate = self
-    webView.uiDelegate = self
-    webView.configuration.userContentController.add(self, name: "jarvis")
-    container.addSubview(webView)
+    page.webView.frame = container.bounds
+    page.webView.autoresizingMask = [.width, .height]
+    container.addSubview(page.webView)
     panel.contentView = container
 
     // The strip at the top belongs to the window (it is where the panel is
     // dragged), so the page is told how tall it is and keeps clear of it.
-    let marker = WKUserScript(
-      source: "document.documentElement.classList.add('jarvis-native');"
-        + "document.documentElement.style.setProperty('--jarvis-titlebar', '\(titleStripHeight)px');",
-      injectionTime: .atDocumentStart, forMainFrameOnly: true)
-    webView.configuration.userContentController.addUserScript(marker)
+    page.mark(titleStrip: titleStripHeight)
+    page.onAction = { [weak self] action in self?.onAction?(action) }
+    page.onLost = { [weak self] in self?.placeholder.isHidden = false }
+    page.onLoaded = { [weak self] title in
+      guard let self else { return }
+      self.placeholder.isHidden = true
+      Log.write(
+        "panel loaded: \"\(title)\" frame \(self.frameDescription)"
+          + " title strip \(self.titleStripHeight) px")
+      if let reason = self.pendingReason, self.panel.isVisible { self.tellPage(reason) }
+      self.pendingReason = nil
+    }
 
     if !panel.setFrameUsingName(PanelController.frameName) {
       panel.setFrame(PanelController.defaultFrame(), display: false)
@@ -153,149 +144,15 @@ final class PanelController: NSObject, WKNavigationDelegate, WKUIDelegate, WKScr
     if !visible { panel.setFrame(PanelController.defaultFrame(), display: false) }
   }
 
-  // MARK: Loading the page
-
-  private var pageURL: URL { URL(string: "http://127.0.0.1:\(port)/?panel=1")! }
+  // MARK: The page
 
   func update(port: Int, hideFromScreenShare: Bool) {
     panel.sharingType = hideFromScreenShare ? .none : .readOnly
-    guard port != self.port else { return }
-    self.port = port
-    load()
+    page.update(port: port)
   }
 
   func load() {
-    retry?.cancel()
-    var request = URLRequest(url: pageURL)
-    request.cachePolicy = .reloadIgnoringLocalCacheData
-    request.timeoutInterval = 5
-    webView.load(request)
-  }
-
-  /// The daemon is not answering yet (or went away): try again in a second.
-  private func loadAgainSoon(_ why: String) {
-    if loaded { Log.write("panel lost its page (\(why))") }
-    loaded = false
-    placeholder.isHidden = false
-    retry?.cancel()
-    let work = DispatchWorkItem { [weak self] in self?.load() }
-    retry = work
-    DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
-  }
-
-  func webView(
-    _ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
-    decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
-  ) {
-    if navigationResponse.isForMainFrame,
-      let response = navigationResponse.response as? HTTPURLResponse, response.statusCode != 200
-    {
-      decisionHandler(.cancel)
-      loadAgainSoon("HTTP \(response.statusCode)")
-      return
-    }
-    decisionHandler(.allow)
-  }
-
-  func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-    loaded = true
-    placeholder.isHidden = true
-    webView.evaluateJavaScript("document.title") { [weak self] title, _ in
-      guard let self else { return }
-      Log.write(
-        "panel loaded: \"\(title as? String ?? "")\" frame \(self.frameDescription)"
-          + " title strip \(self.titleStripHeight) px")
-    }
-    if let reason = pendingReason, panel.isVisible { tellPage(reason) }
-    pendingReason = nil
-  }
-
-  func webView(
-    _ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
-    withError error: Error
-  ) {
-    loadAgainSoon(error.localizedDescription)
-  }
-
-  func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-    guard (error as NSError).code != NSURLErrorCancelled else { return }
-    loadAgainSoon(error.localizedDescription)
-  }
-
-  func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-    loadAgainSoon("the page's process ended")
-  }
-
-  // MARK: Links
-
-  private func isOurPage(_ url: URL) -> Bool {
-    url.scheme == "http" && (url.host == "127.0.0.1" || url.host == "localhost")
-      && (url.port ?? 80) == port
-  }
-
-  func webView(
-    _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
-    decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
-  ) {
-    guard let url = navigationAction.request.url else {
-      decisionHandler(.cancel)
-      return
-    }
-    if isOurPage(url) || url.scheme == "about" {
-      decisionHandler(.allow)
-      return
-    }
-    // Anything else leaves the panel, and only when the user clicked it.
-    if navigationAction.navigationType == .linkActivated { openOutside(url) }
-    decisionHandler(.cancel)
-  }
-
-  /// Links that ask for a new window (target="_blank").
-  func webView(
-    _ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
-    for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures
-  ) -> WKWebView? {
-    if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
-      if isOurPage(url) { webView.load(navigationAction.request) } else { openOutside(url) }
-    }
-    return nil
-  }
-
-  private func openOutside(_ url: URL) {
-    switch url.scheme {
-    case "http", "https", "mailto":
-      NSWorkspace.shared.open(url)
-    case "file":
-      var executable = false
-      if let values = try? url.resourceValues(forKeys: [.isExecutableKey, .isDirectoryKey]) {
-        executable = values.isExecutable == true && values.isDirectory != true
-      }
-      if executable || PanelController.runnableExtensions.contains(url.pathExtension.lowercased()) {
-        NSWorkspace.shared.activateFileViewerSelecting([url])
-      } else {
-        NSWorkspace.shared.open(url)
-      }
-    default:
-      Log.write("ignored a link with scheme \(url.scheme ?? "none")")
-    }
-  }
-
-  // MARK: Messages from the page
-
-  func userContentController(
-    _ userContentController: WKUserContentController, didReceive message: WKScriptMessage
-  ) {
-    let origin = message.frameInfo.securityOrigin
-    guard message.frameInfo.isMainFrame, origin.host == "127.0.0.1" || origin.host == "localhost",
-      origin.port == port, let body = message.body as? [String: Any],
-      let action = body["action"] as? String
-    else { return }
-    switch action {
-    case "hide": hide()
-    case "show": show(reason: "attention", activate: false)
-    case "quit": onQuit?()
-    default: Log.write("the page sent an unknown action: \(action)")
-    }
+    page.load()
   }
 
   // MARK: Showing and hiding
@@ -310,12 +167,12 @@ final class PanelController: NSObject, WKNavigationDelegate, WKUIDelegate, WKScr
       }
       NSApp.activate(ignoringOtherApps: true)
       panel.makeKeyAndOrderFront(nil)
-      panel.makeFirstResponder(webView)
+      panel.makeFirstResponder(page.webView)
     } else {
       panel.orderFrontRegardless()
     }
     Log.write("panel shown (\(reason))")
-    if loaded { tellPage(reason) } else { pendingReason = reason }
+    if page.loaded { tellPage(reason) } else { pendingReason = reason }
   }
 
   func hide() {
@@ -332,8 +189,7 @@ final class PanelController: NSObject, WKNavigationDelegate, WKUIDelegate, WKScr
   }
 
   private func tellPage(_ reason: String) {
-    webView.evaluateJavaScript(
-      "window.jarvisNative && window.jarvisNative.onShow && window.jarvisNative.onShow('\(reason)'); null"
-    ) { _, _ in }
+    page.run(
+      "window.jarvisNative && window.jarvisNative.onShow && window.jarvisNative.onShow('\(reason)')")
   }
 }

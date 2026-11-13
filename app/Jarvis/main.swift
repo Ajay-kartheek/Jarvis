@@ -2,6 +2,7 @@
 //
 // One program, started in one of three ways:
 //   Jarvis                                     the menu-bar app (App.swift)
+//                                              JARVIS_TEST=1 makes it a test copy (see TestMode)
 //   Jarvis --port N [--no-mic] [--no-system]   the audio helper (Capture.swift)
 //   Jarvis --list-audio                        print which processes use audio, then exit
 

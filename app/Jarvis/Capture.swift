@@ -494,19 +494,58 @@ final class SystemAudioTap {
 // MARK: - Microphone
 
 final class MicCapture {
-  private let link: Link
+  /// Receives each stretch of sound as 16 kHz mono float32 samples with its
+  /// peak level. Called on the audio thread.
+  private let onAudio: (Data, Float) -> Void
+  /// Receives what happens to the capture: mic_started, mic_restarting, mic_failed.
+  private let onStatus: (String, [String: Any]) -> Void
+  // Where the capture is set up again after the input device changes. Whoever
+  // owns the capture starts and stops it from this queue too.
+  private let queue: DispatchQueue
   private let engine = AVAudioEngine()
   private var resampler: Resampler?
-  private let meter: LevelMeter
   private var observer: NSObjectProtocol?
+  private var running = false
+  private var tapFormat: AVAudioFormat?
+  // What the converter above was made for.
+  private var resamplerFormat: AVAudioFormat?
 
-  init(link: Link) {
-    self.link = link
-    self.meter = LevelMeter(link: link, source: "mic")
+  init(
+    queue: DispatchQueue = .main, onAudio: @escaping (Data, Float) -> Void,
+    onStatus: @escaping (String, [String: Any]) -> Void
+  ) {
+    self.queue = queue
+    self.onAudio = onAudio
+    self.onStatus = onStatus
   }
 
+  /// The device the engine's input is bound to, as the engine reports it.
+  var boundDevice: AudioDeviceID { engine.inputNode.auAudioUnit.deviceID }
+
+  /// The helper's microphone: sound and status go to the Python process. It records from the
+  /// system's default input, whatever app.json says about talking to Jarvis (see `install`
+  /// for the one thing a test copy can change).
+  convenience init(link: Link) {
+    let meter = LevelMeter(link: link, source: "mic")
+    self.init(
+      onAudio: { data, peak in
+        meter.add(peak)
+        link.send(.mic, data)
+      },
+      onStatus: { event, fields in link.status(event, fields) })
+  }
+
+  /// Can be called again after `stop`: the app opens the microphone once per
+  /// spoken message.
   func start() throws {
-    try install()
+    running = true
+    do {
+      try install()
+      try begin()
+    } catch {
+      running = false
+      throw error
+    }
     // The engine stops itself when the input device changes (AirPods connect,
     // a headset is unplugged), so set it up again.
     observer = NotificationCenter.default.addObserver(
@@ -514,47 +553,162 @@ final class MicCapture {
     ) { [weak self] _ in
       // Give the new device a moment to settle, and do the work off the
       // thread that delivered the notification.
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-        guard let self else { return }
-        self.link.status("mic_restarting", ["reason": "input device changed"])
+      guard let queue = self?.queue else { return }
+      queue.asyncAfter(deadline: .now() + 0.6) {
+        guard let self, self.running else { return }  // stopped meanwhile
+        self.onStatus("mic_restarting", ["reason": "input device changed"])
         self.engine.inputNode.removeTap(onBus: 0)
         do {
           try self.install()
+          try self.begin()
         } catch {
-          self.link.status("mic_failed", ["error": "\(error)"])
+          self.onStatus("mic_failed", ["error": "\(error)"])
         }
       }
     }
   }
 
+  /// Puts the tap on the input and prepares the engine, without starting it.
   private func install() throws {
     let input = engine.inputNode
+    if let forced = InputDevice.testChoice() {
+      // Only a test copy gets here: it listens to the microphone it is told to (the helper
+      // regression test uses this), not the system's default one.
+      guard forced != AudioDeviceID(kAudioObjectUnknown) else {
+        throw EarsError("The input device JARVIS_INPUT_DEVICE names is not there")
+      }
+      try input.auAudioUnit.setDeviceID(forced)
+    }
     let format = input.outputFormat(forBus: 0)
     guard format.sampleRate > 0, format.channelCount > 0 else {
       throw EarsError("No microphone input is available")
     }
-    guard let resampler = Resampler(from: format) else {
+    guard Resampler(from: format) != nil else {
       throw EarsError("Unsupported microphone format")
     }
-    self.resampler = resampler
-    input.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
-      guard let self, let converted = self.resampler?.convert(buffer) else { return }
-      self.meter.add(converted.peak)
-      self.link.send(.mic, converted.data)
+    resampler = nil  // made from the first buffer, below
+    resamplerFormat = nil
+    // No format is given to the tap: it takes whatever the input delivers. A format of our own
+    // that is stale by then (earphones switching to call mode change the input under a running
+    // engine) is refused with an exception, which cannot be caught and ends the app. The
+    // converter follows the format of the buffers themselves.
+    input.installTap(onBus: 0, bufferSize: 2048, format: nil) { [weak self] buffer, _ in
+      guard let self else { return }
+      if self.resampler == nil || self.resamplerFormat != buffer.format {
+        self.resampler = Resampler(from: buffer.format)
+        self.resamplerFormat = buffer.format
+      }
+      guard let converted = self.resampler?.convert(buffer) else { return }
+      self.onAudio(converted.data, converted.peak)
     }
+    tapFormat = format
     engine.prepare()
-    try engine.start()
-    link.status(
+  }
+
+  /// Starts the engine, whose tap is in place, and says so.
+  private func begin() throws {
+    do {
+      try engine.start()
+    } catch {
+      engine.inputNode.removeTap(onBus: 0)  // or the next start would find a tap already there
+      throw error
+    }
+    onStatus(
       "mic_started",
       [
-        "sample_rate": format.sampleRate,
-        "channels": Int(format.channelCount),
+        "sample_rate": tapFormat?.sampleRate ?? 0,
+        "channels": Int(tapFormat?.channelCount ?? 0),
       ])
   }
 
   func stop() {
+    running = false
+    if let observer { NotificationCenter.default.removeObserver(observer) }
+    observer = nil
     engine.inputNode.removeTap(onBus: 0)
     engine.stop()
+  }
+}
+
+// MARK: - One named microphone, straight from Core Audio
+
+/// Records from one particular input device through Core Audio, without AVAudioEngine.
+///
+/// An engine always starts out bound to the system's default input, and merely setting one up
+/// disturbs earphones that happen to be the default (their reported sample rate flips, even
+/// though nothing is recorded). This never looks at the default input, so a spoken message
+/// can be recorded from the Mac's own microphone and the earphones are left entirely alone.
+/// It also hands sound over every IO cycle (about 10 ms) rather than in blocks of 100 ms, so the
+/// first sound comes sooner and the end of a message is not cut off.
+final class DeviceCapture {
+  let device: AudioDeviceID
+  /// The rate the device runs at, known once started.
+  private(set) var rate = 0.0
+  private let onAudio: (Data, Float) -> Void
+  // Audio callbacks run here. Stopping waits for a callback in progress, so it must not be
+  // called from this queue.
+  private let ioQueue = DispatchQueue(label: "jarvis.app.voice.io", qos: .userInteractive)
+  private var procID: AudioDeviceIOProcID?
+  private var format: AVAudioFormat?
+  private var resampler: Resampler?
+
+  /// Receives each stretch of sound as 16 kHz mono float32 samples with its peak level.
+  init(device: AudioDeviceID, onAudio: @escaping (Data, Float) -> Void) {
+    self.device = device
+    self.onAudio = onAudio
+  }
+
+  func start() throws {
+    guard device != AudioDeviceID(kAudioObjectUnknown) else {
+      throw EarsError("The chosen input device is not there")
+    }
+    guard var description = InputDevice.streamFormat(of: device),
+      let format = AVAudioFormat(streamDescription: &description),
+      format.sampleRate > 0, format.channelCount > 0,
+      format.isInterleaved || format.channelCount == 1,
+      let resampler = Resampler(from: format)
+    else { throw EarsError("Unsupported microphone format") }
+    self.format = format
+    self.resampler = resampler
+    rate = format.sampleRate
+    var newProc: AudioDeviceIOProcID?
+    try check(
+      AudioDeviceCreateIOProcIDWithBlock(&newProc, device, ioQueue) {
+        [weak self] _, inputData, _, _, _ in
+        self?.process(inputData)
+      }, "Creating the audio callback")
+    procID = newProc
+    let status = AudioDeviceStart(device, procID)
+    if status != noErr {
+      if let procID { AudioDeviceDestroyIOProcID(device, procID) }
+      procID = nil
+      throw EarsError("Starting the microphone failed (OSStatus \(status))")
+    }
+  }
+
+  func stop() {
+    guard let procID else { return }
+    AudioDeviceStop(device, procID)
+    AudioDeviceDestroyIOProcID(device, procID)
+    self.procID = nil
+  }
+
+  private func process(_ inputData: UnsafePointer<AudioBufferList>) {
+    let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+    guard let format, let resampler, let first = buffers.first, first.mData != nil,
+      first.mDataByteSize > 0
+    else { return }
+    var single = AudioBufferList(mNumberBuffers: 1, mBuffers: first)
+    let converted = withUnsafePointer(to: &single) { pointer -> (data: Data, peak: Float)? in
+      guard
+        let buffer = AVAudioPCMBuffer(
+          pcmFormat: format, bufferListNoCopy: pointer, deallocator: nil),
+        buffer.frameLength > 0
+      else { return nil }
+      return resampler.convert(buffer)
+    }
+    guard let converted else { return }
+    onAudio(converted.data, converted.peak)
   }
 }
 

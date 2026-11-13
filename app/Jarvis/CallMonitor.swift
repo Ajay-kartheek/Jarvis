@@ -190,6 +190,129 @@ enum OutputDevice {
   }
 }
 
+enum InputDevice {
+  private static let system = AudioObjectID(kAudioObjectSystemObject)
+  private static let internalMicrophone: UInt32 = 0x696D_6963  // 'imic', the data source
+
+  /// The input macOS has made the default: what an app records from unless it asks for another.
+  /// (A test copy can be told to see another device as the default, to try each case of the
+  /// rule for choosing a microphone without changing the Mac's settings.)
+  static func systemDefault() -> AudioDeviceID? {
+    if let part = TestMode.text("JARVIS_TEST_DEFAULT_INPUT") { return find(named: part) }
+    guard
+      let device: AudioDeviceID = AudioProcesses.number(
+        system, kAudioHardwarePropertyDefaultInputDevice),
+      device != kAudioObjectUnknown
+    else { return nil }
+    return device
+  }
+
+  /// The test copy's own pick, from JARVIS_INPUT_DEVICE (part of a device name); nil when that
+  /// is not set. If no input device has that name the answer is `kAudioObjectUnknown`, so a
+  /// test never falls back to, say, the user's earphones.
+  static func testChoice() -> AudioDeviceID? {
+    guard let part = TestMode.text("JARVIS_INPUT_DEVICE") else { return nil }
+    return find(named: part) ?? AudioDeviceID(kAudioObjectUnknown)
+  }
+
+  /// True for a Bluetooth microphone (AirPods and the like). Opening one switches the earphones
+  /// to their call mode, which the wearer hears, and takes a second or two.
+  static func isBluetooth(_ device: AudioDeviceID) -> Bool {
+    let transport: UInt32 = AudioProcesses.number(device, kAudioDevicePropertyTransportType) ?? 0
+    return transport == kAudioDeviceTransportTypeBluetooth
+      || transport == kAudioDeviceTransportTypeBluetoothLE
+  }
+
+  static func name(of device: AudioDeviceID?) -> String {
+    guard let device, device != kAudioObjectUnknown else { return "none" }
+    return AudioProcesses.string(device, kAudioObjectPropertyName) ?? "unnamed"
+  }
+
+  /// The format sound arrives in from the device's first input stream.
+  static func streamFormat(of device: AudioDeviceID) -> AudioStreamBasicDescription? {
+    var streamsAddress = AudioObjectPropertyAddress(
+      mSelector: kAudioDevicePropertyStreams, mScope: kAudioDevicePropertyScopeInput,
+      mElement: kAudioObjectPropertyElementMain)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(device, &streamsAddress, 0, nil, &size) == noErr,
+      size >= UInt32(MemoryLayout<AudioStreamID>.size)
+    else { return nil }
+    var streams = [AudioStreamID](
+      repeating: AudioStreamID(kAudioObjectUnknown),
+      count: Int(size) / MemoryLayout<AudioStreamID>.stride)
+    guard AudioObjectGetPropertyData(device, &streamsAddress, 0, nil, &size, &streams) == noErr,
+      let stream = streams.first
+    else { return nil }
+    var formatAddress = globalAddress(kAudioStreamPropertyVirtualFormat)
+    var description = AudioStreamBasicDescription()
+    var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.stride)
+    guard
+      AudioObjectGetPropertyData(stream, &formatAddress, 0, nil, &formatSize, &description)
+        == noErr
+    else { return nil }
+    return description
+  }
+
+  /// The Mac's own microphone, if there is one that can be used now. With the lid closed (an
+  /// external display in use) macOS takes it away, and some Macs have none: then this is nil.
+  static func builtIn() -> AudioDeviceID? {
+    if TestMode.flag("JARVIS_TEST_NO_BUILTIN") { return nil }
+    let usable = inputDevices().filter { device in
+      let transport: UInt32 =
+        AudioProcesses.number(device, kAudioDevicePropertyTransportType) ?? 0
+      let alive: UInt32 = AudioProcesses.number(device, kAudioDevicePropertyDeviceIsAlive) ?? 0
+      let hidden: UInt32 = AudioProcesses.number(device, kAudioDevicePropertyIsHidden) ?? 0
+      // Hog mode: another process may have the device to itself, and then it is not ours to use.
+      let hog: Int32 = AudioProcesses.number(device, kAudioDevicePropertyHogMode) ?? -1
+      // A microphone macOS would not let anyone make the default is not one to use either.
+      let selectable: UInt32 =
+        AudioProcesses.number(
+          device, kAudioDevicePropertyDeviceCanBeDefaultDevice,
+          scope: kAudioDevicePropertyScopeInput) ?? 1
+      return transport == kAudioDeviceTransportTypeBuiltIn && alive != 0 && hidden == 0
+        && selectable != 0 && (hog == -1 || hog == getpid())
+    }
+    // The microphone in the case, rather than, say, a headset on the headphone socket.
+    return usable.first { device in
+      let source: UInt32? = AudioProcesses.number(
+        device, kAudioDevicePropertyDataSource, scope: kAudioDevicePropertyScopeInput)
+      return source == internalMicrophone
+    } ?? usable.first
+  }
+
+  /// The first input device whose name contains `part`, ignoring case.
+  static func find(named part: String) -> AudioDeviceID? {
+    let wanted = part.lowercased()
+    return inputDevices().first {
+      (AudioProcesses.string($0, kAudioObjectPropertyName) ?? "").lowercased().contains(wanted)
+    }
+  }
+
+  /// Every device that can record.
+  private static func inputDevices() -> [AudioDeviceID] {
+    var address = globalAddress(kAudioHardwarePropertyDevices)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(system, &address, 0, nil, &size) == noErr, size > 0
+    else { return [] }
+    let stride = MemoryLayout<AudioDeviceID>.stride
+    var devices = [AudioDeviceID](
+      repeating: AudioDeviceID(kAudioObjectUnknown), count: Int(size) / stride)
+    let status = devices.withUnsafeMutableBufferPointer {
+      AudioObjectGetPropertyData(system, &address, 0, nil, &size, $0.baseAddress!)
+    }
+    guard status == noErr else { return [] }
+    return devices.filter(hasInput)
+  }
+
+  private static func hasInput(_ device: AudioDeviceID) -> Bool {
+    var address = AudioObjectPropertyAddress(
+      mSelector: kAudioDevicePropertyStreams, mScope: kAudioDevicePropertyScopeInput,
+      mElement: kAudioObjectPropertyElementMain)
+    var size: UInt32 = 0
+    return AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr && size > 0
+  }
+}
+
 // MARK: - The call state
 
 final class CallMonitor {
