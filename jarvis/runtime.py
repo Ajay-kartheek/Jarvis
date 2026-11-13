@@ -536,8 +536,12 @@ class Runtime:
         """After a restart, put today's preparation sheets back under the orb: the user may be about to need them."""
         start = int(datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
         with open_store() as store:
-            sheets = store.artifacts("prep", since=start, limit=3)
-        for sheet in reversed(sheets):  # the newest ends up on top
+            sheets = store.artifacts("prep", since=start, limit=8)
+        latest: dict[tuple, dict] = {}
+        for sheet in sheets:  # newest first: a sheet that was redone replaces the earlier one
+            meeting = sheet["meta"].get("meeting") or {}
+            latest.setdefault((sheet["title"], meeting.get("start")), sheet)
+        for sheet in reversed(list(latest.values())):  # the newest ends up on top
             meeting = sheet["meta"].get("meeting") or {}
             if meeting.get("end") and datetime.fromisoformat(meeting["end"]).timestamp() < time.time():
                 continue  # that meeting is over

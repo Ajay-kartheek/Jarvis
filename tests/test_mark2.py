@@ -415,6 +415,7 @@ def test_todays_preparation_sheets_come_back_after_a_restart(client):
     ahead = {"start": soon.isoformat(), "end": soon.replace(year=soon.year + 1).isoformat()}
     with open_store() as store:
         store.artifact_add("prep", "Atlas weekly", project="Atlas", body="old sheet", meta={"meeting": over})
+        store.artifact_add("prep", "Borealis review", project="Borealis", body="first try", meta={"meeting": ahead}, ts=int(soon.timestamp()) - 60)
         store.artifact_add("prep", "Borealis review", project="Borealis", body="the sheet", meta={"meeting": ahead})
     runtime.restore_cards()
     cards = client.get("/api/state").json()["cards"]
