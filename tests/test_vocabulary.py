@@ -35,3 +35,15 @@ def test_the_list_has_engagements_people_taught_words_and_the_common_terms(store
 ])
 def test_the_leaning_reading_is_kept_only_when_it_is_the_plain_one_corrected(plain, leaning, kept):
     assert vocabulary.agrees(plain, leaning) is kept
+
+
+def test_terms_come_from_each_dossier_too(store, fake_home):
+    from jarvis import dossier
+
+    dossier.save("Atlas", "# Atlas\n\n## People\n- Priya: lead\n\n## Terms and names\n"
+                          "- **Price Warden** (heard as \"price warden\")\n- Final Source: the last agent\n"
+                          "- PMD — the client's data team\n- a long sentence that is not a term at all here\n\n## Recent work\n- none\n")
+    assert vocabulary.dossier_terms("Atlas") == ["Price Warden", "Final Source", "PMD"]
+    found = vocabulary.words(store, load_config())
+    assert "Price Warden" in found and "Final Source" in found
+    assert vocabulary.dossier_terms("Borealis") == []

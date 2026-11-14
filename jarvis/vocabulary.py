@@ -50,6 +50,26 @@ def teach(store: Store, word: str) -> list[str]:
     return known
 
 
+def dossier_terms(name: str, limit: int = 30) -> list[str]:
+    """The names and terms listed under "Terms and names" in an engagement's dossier."""
+    from jarvis import dossier
+
+    text = dossier.read(name)
+    match = re.search(r"^## Terms and names\s*$(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+    if not match:
+        return []
+    terms = []
+    for line in match.group(1).splitlines():
+        line = line.strip()
+        if not line.startswith(("-", "*")):
+            continue
+        term = re.split(r"\s+[(\u2014\u2013-]\s*|:\s", line.lstrip("-* ").replace("**", ""), maxsplit=1)[0]
+        term = term.strip(" .,;\"'`")
+        if 2 <= len(term) <= 40 and len(term.split()) <= 4:
+            terms.append(term)
+    return terms[:limit]
+
+
 def words(store: Store, config: Config, extra: list[str] | tuple[str, ...] = ()) -> list[str]:
     """Everything worth leaning towards right now: ``extra`` first (the people in this meeting, say)."""
     found: list[str] = list(extra)
@@ -58,6 +78,10 @@ def words(store: Store, config: Config, extra: list[str] | tuple[str, ...] = ())
         for person in project.people:
             found.append(person)
             found.append(person.split()[0] if person.split() else "")
+        try:
+            found.extend(dossier_terms(project.name))
+        except Exception:  # a dossier that cannot be read takes nothing away from the rest
+            pass
     found.extend(taught(store))
     found.extend(COMMON)
     seen, kept = set(), []
