@@ -267,6 +267,27 @@ export interface Dossier {
   promises?: PromiseEntry[] | null;
 }
 
+/** Where Jarvis found a word it listens for by itself. */
+export type WordSource = "engagement" | "person" | "dossier" | "common";
+
+/** A word the speech recogniser leans towards that Jarvis found by itself, and where it found it. */
+export interface HeardWord {
+  word: string;
+  source: WordSource;
+}
+
+/** The words Jarvis listens for: the ones the user taught it, and the ones it found itself, which are read-only. */
+export interface Vocabulary {
+  taught: string[];
+  automatic: HeardWord[];
+}
+
+/** A name as it is written, and how to spell it so that Jarvis's voice says it right. */
+export interface Pronunciation {
+  written: string;
+  said: string;
+}
+
 export type ServerMessage =
   | ({ type: "state" } & Partial<AppState>)
   // a call being listened to
@@ -286,7 +307,8 @@ export type ServerMessage =
   | { type: "turn"; id: string; text: string; spoken: boolean; at: string }
   | { type: "step"; id: string; text: string }
   | { type: "reply_delta"; id: string; text: string }
-  | { type: "reply"; id: string; text: string; speak: boolean; seconds: number; at: string }
+  // ignored: heard without Jarvis's name and meant for someone else; the exchange is taken back
+  | { type: "reply"; id: string; text: string; speak: boolean; seconds: number; at: string; ignored?: boolean }
   | { type: "reply_error"; id: string; text: string }
   | { type: "say"; id: string; text: string; at: string }
   | { type: "speech"; id: string; seq: number; text: string; url: string }
@@ -326,6 +348,15 @@ export interface Api {
   reminders(): Promise<Reminder[]>;
   promises(): Promise<PromiseEntry[]>;
   engagement(name: string): Promise<Dossier>;
+  /** A fact the user typed; `engagement` null makes it a general one. It comes back as the service keeps it. */
+  addFact(text: string, engagement: string | null): Promise<Fact>;
+  vocabulary(): Promise<Vocabulary>;
+  /** Each change to the words or to the names comes back as the whole list as it then stands. */
+  teachWord(word: string): Promise<Vocabulary>;
+  unteachWord(word: string): Promise<Vocabulary>;
+  pronunciations(): Promise<Pronunciation[]>;
+  addPronunciation(written: string, said: string): Promise<Pronunciation[]>;
+  removePronunciation(written: string): Promise<Pronunciation[]>;
 }
 
 /** A request the server answered with an error. `status` tells a missing endpoint from a broken one. */
@@ -399,6 +430,13 @@ export const rest: Api = {
   reminders: () => call("GET", "/api/reminders"),
   promises: () => call("GET", "/api/promises"),
   engagement: (name) => call("GET", `/api/engagements/${seg(name)}`),
+  addFact: (text, engagement) => call("POST", "/api/facts", { text, engagement }),
+  vocabulary: () => call("GET", "/api/vocabulary"),
+  teachWord: (word) => call("POST", "/api/vocabulary", { word }),
+  unteachWord: (word) => call("DELETE", `/api/vocabulary/${seg(word)}`),
+  pronunciations: () => call("GET", "/api/pronunciations"),
+  addPronunciation: (written, said) => call("POST", "/api/pronunciations", { written, said }),
+  removePronunciation: (written) => call("DELETE", `/api/pronunciations/${seg(written)}`),
 };
 
 const RETRY_MIN_MS = 500;

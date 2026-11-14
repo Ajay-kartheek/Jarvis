@@ -49,6 +49,20 @@ class AnswerRequest(BaseModel):
     text: str
 
 
+class FactRequest(BaseModel):
+    text: str
+    engagement: str | None = None  # None: a general fact, not about one engagement
+
+
+class WordRequest(BaseModel):
+    word: str
+
+
+class PronunciationRequest(BaseModel):
+    written: str
+    said: str
+
+
 class ApprovalRequest(BaseModel):
     approve: bool
     scope: Literal["task"] | None = None  # "Allow for this task": the yes holds for the rest of that task
@@ -315,11 +329,59 @@ def create_app(config: Config, *, background: bool = False) -> FastAPI:
     async def get_facts() -> list[dict]:
         return dashboard.facts()
 
+    @app.post("/api/facts")
+    async def add_fact(body: FactRequest) -> dict:
+        try:
+            fact = dashboard.remember(config, body.text, body.engagement)
+        except dashboard.DashboardError as exc:
+            raise HTTPException(422, str(exc)) from None
+        runtime.record("memory", f"Remembered: {fact['text'][:160]}")
+        return fact
+
     @app.delete("/api/facts/{fact_id}")
     async def delete_fact(fact_id: int) -> dict:
         if not dashboard.forget(fact_id):
             raise HTTPException(404, "There is no fact with that number.")
         return {"ok": True}
+
+    @app.get("/api/vocabulary")
+    async def get_vocabulary() -> dict:
+        return dashboard.vocabulary(config)
+
+    @app.post("/api/vocabulary")
+    async def add_word(body: WordRequest) -> dict:
+        try:
+            word = dashboard.teach(body.word)
+        except dashboard.DashboardError as exc:
+            raise HTTPException(422, str(exc)) from None
+        runtime.record("memory", f"Learnt the word: {word}")
+        return dashboard.vocabulary(config)
+
+    # ":path": a word such as CI/CD has a slash in it, which the browser sends as %2F and the server reads as a slash.
+    @app.delete("/api/vocabulary/{word:path}")
+    async def delete_word(word: str) -> dict:
+        if not dashboard.unteach(word):
+            raise HTTPException(404, "Jarvis was not taught that word.")
+        return dashboard.vocabulary(config)
+
+    @app.get("/api/pronunciations")
+    async def get_pronunciations() -> list[dict]:
+        return dashboard.pronunciations()
+
+    @app.post("/api/pronunciations")
+    async def add_pronunciation(body: PronunciationRequest) -> list[dict]:
+        try:
+            pair = dashboard.pronounce(body.written, body.said)
+        except dashboard.DashboardError as exc:
+            raise HTTPException(422, str(exc)) from None
+        runtime.record("memory", f"Learnt to say {pair['written']} as {pair['said']}")
+        return dashboard.pronunciations()
+
+    @app.delete("/api/pronunciations/{written:path}")
+    async def delete_pronunciation(written: str) -> list[dict]:
+        if not dashboard.unpronounce(written):
+            raise HTTPException(404, "Jarvis has no special way of saying that name.")
+        return dashboard.pronunciations()
 
     @app.get("/api/activity")
     async def get_activity(limit: int = 200) -> list[dict]:

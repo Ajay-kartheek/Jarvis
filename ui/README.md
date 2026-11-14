@@ -13,7 +13,8 @@ The browser front end for Jarvis. One build, two views:
   show (see "The small orb").
 - **The dashboard** (`/?view=dashboard`): an ordinary window for reading and managing what Jarvis knows,
   made and did: Overview (with reminders and promises), Today, Library, Engagements (with each one's
-  dossier), Activity, Settings.
+  dossier), Memory (what Jarvis was told to remember, the words he listens for and how names are said, all
+  of which the user can add to), Activity, Settings.
 
 Parts of the service may be older than the page. An endpoint that answers 404 (reminders, promises, an
 engagement's dossier) only leaves its place on the dashboard empty: never an error on screen. The settings

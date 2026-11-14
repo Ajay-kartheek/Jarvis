@@ -17,12 +17,15 @@ import {
   at,
   daysAgo,
   demoActivity,
+  demoAutomatic,
   demoDossier,
   demoFacts,
   demoLibrary,
   demoPromises,
+  demoPronunciations,
   demoReminders,
   demoSources,
+  demoTaught,
   demoToday,
   minutes,
 } from "./demoData";
@@ -208,6 +211,9 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
   };
   let app = INITIAL();
   let facts = demoFacts();
+  let nextFact = 100; // the facts typed in get the numbers from here; the made-up ones are below
+  let taught = demoTaught();
+  let names = demoPronunciations();
   let activity = demoActivity();
   let call: AbortController | null = null; // set while a call is playing
   let meter = 0;
@@ -860,6 +866,36 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
     reminders: async () => demoReminders(),
     promises: async () => demoPromises(),
     engagement: async (name) => demoDossier(name),
+    addFact: async (text, engagement) => {
+      const fact = { id: nextFact++, text, engagement, at: at() };
+      facts = [fact, ...facts];
+      log("remember", `Remembered: ${text}`);
+      return fact;
+    },
+    vocabulary: async () => ({ taught, automatic: demoAutomatic() }),
+    teachWord: async (word) => {
+      if (!taught.some((known) => known.toLowerCase() === word.toLowerCase())) taught = [...taught, word];
+      log("remember", `Learnt the word: ${word}`);
+      return { taught, automatic: demoAutomatic() };
+    },
+    unteachWord: async (word) => {
+      taught = taught.filter((known) => known.toLowerCase() !== word.toLowerCase());
+      return { taught, automatic: demoAutomatic() };
+    },
+    pronunciations: async () => names,
+    addPronunciation: async (written, said) => {
+      const same = (name: string) => name.toLowerCase() === written.toLowerCase();
+      // A name that is there already keeps its place and takes the new spelling.
+      names = names.some((pair) => same(pair.written))
+        ? names.map((pair) => (same(pair.written) ? { ...pair, said } : pair))
+        : [...names, { written, said }];
+      log("remember", `Learnt to say ${written} as ${said}`);
+      return names;
+    },
+    removePronunciation: async (written) => {
+      names = names.filter((pair) => pair.written.toLowerCase() !== written.toLowerCase());
+      return names;
+    },
   };
 
   if (scene && (SCENES as readonly string[]).includes(scene)) hold(scene);

@@ -1,4 +1,4 @@
-// The dashboard's side rail: the name with a small orb, the six sections, and how the page is linked.
+// The dashboard's side rail: the name with a small orb, the seven sections, and how the page is linked.
 
 import type { ReactNode } from "react";
 import { motion } from "motion/react";
@@ -12,6 +12,7 @@ export const SECTIONS = [
   { id: "today", label: "Today" },
   { id: "library", label: "Library" },
   { id: "engagements", label: "Engagements" },
+  { id: "memory", label: "Memory" },
   { id: "activity", label: "Activity" },
   { id: "settings", label: "Settings" },
 ] as const;

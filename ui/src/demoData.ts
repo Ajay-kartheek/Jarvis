@@ -1,7 +1,21 @@
 // Made-up data for the demo, and for the dashboard when no server answers. Every name here is invented.
 // Times are worked out from now, so "a meeting happening now" is always happening now.
 
-import type { Activity, Counts, Dossier, Engagement, Fact, Item, Library, PromiseEntry, Reminder, SourceStatus, Today } from "./api";
+import type {
+  Activity,
+  Counts,
+  Dossier,
+  Engagement,
+  Fact,
+  HeardWord,
+  Item,
+  Library,
+  PromiseEntry,
+  Pronunciation,
+  Reminder,
+  SourceStatus,
+  Today,
+} from "./api";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -264,6 +278,48 @@ export function demoFacts(): Fact[] {
     { id: 6, text: "Keep spoken replies to two sentences.", engagement: null, at: at(-20 * DAY) },
   ];
 }
+
+/** The words the demo's user taught Jarvis. */
+export const demoTaught = (): string[] => ["Tessera", "Quillon Gate"];
+
+/**
+ * What Jarvis found by itself to listen for, in the order the service gives it: each engagement with its people
+ * and terms, then the common ones.
+ */
+export function demoAutomatic(): HeardWord[] {
+  const found: [string, HeardWord["source"]][] = [
+    ["Atlas", "engagement"],
+    ["Priya", "person"],
+    ["Ravi", "person"],
+    ["Cutover Desk", "dossier"],
+    ["Ledger Sync", "dossier"],
+    ["Borealis", "engagement"],
+    ["Meera", "person"],
+    ["SLA-4", "dossier"],
+    ["Jarvis", "common"],
+    ["Claude", "common"],
+    ["Claude Code", "common"],
+    ["agent harness", "common"],
+    ["inference profile", "common"],
+    ["API gateway", "common"],
+    ["statement of work", "common"],
+    ["pull request", "common"],
+    ["prompt caching", "common"],
+    ["vector store", "common"],
+    ["Kubernetes", "common"],
+    ["Bedrock", "common"],
+    ["Cognito", "common"],
+    ["YAML", "common"],
+  ];
+  return found.map(([word, source]) => ({ word, source }));
+}
+
+/** How the demo's user wants names said. */
+export const demoPronunciations = (): Pronunciation[] => [
+  { written: "Priya", said: "Pree-ya" },
+  { written: "Meera", said: "Mee-ra" },
+  { written: "SLA-4", said: "S L A four" },
+];
 
 export function demoActivity(): Activity[] {
   return [

@@ -155,7 +155,8 @@ function EngagementCard({
   );
 }
 
-function Remembered({ facts, onForget }: { facts: Fact[]; onForget: DashboardData["forget"] }) {
+/** What Jarvis was told to remember, each with a Forget; the Memory page lists them too. */
+export function Remembered({ facts, onForget }: { facts: Fact[]; onForget: DashboardData["forget"] }) {
   if (facts.length === 0) return <Empty>Nothing yet. Tell Jarvis to remember something and it appears here.</Empty>;
   return (
     <ul className="facts">

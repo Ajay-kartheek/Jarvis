@@ -231,6 +231,29 @@ html[data-view="dashboard"] .toast { bottom: 24px; }
 .made-item:hover { color: var(--cyan); }
 .made-item time { color: var(--dim); font: 400 11px var(--mono); }
 
+/* ---------- Memory ---------- */
+.memory .frame { display: grid; gap: 14px; }
+.memory .panel-head { margin-bottom: 0; }
+.group { display: grid; gap: 8px; }
+/* The fields of the three forms look like the library's search box. */
+.add { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.add .search { flex: 1 1 200px; width: auto; }
+.add .select { flex: none; max-width: 100%; }
+.arrow { flex: none; color: var(--cyan-mid); font: 400 13px var(--mono); }
+.words { display: flex; flex-wrap: wrap; gap: 6px; }
+/* A word the user taught: a chip with its own way to take it off. */
+.chip.taught { display: inline-flex; align-items: center; gap: 2px; padding-right: 2px; border-color: var(--cyan-mid); color: var(--bright); }
+.chip.taught > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.chip.taught .icon { flex: none; width: 18px; height: 18px; }
+.chip.taught .icon svg { width: 11px; height: 11px; }
+.found { display: grid; gap: 10px; }
+.found > div { display: grid; grid-template-columns: 108px minmax(0, 1fr); align-items: baseline; gap: 12px; }
+.found dt { color: var(--dim); font: 400 10px var(--mono); letter-spacing: 0.14em; text-transform: uppercase; }
+.names { display: grid; }
+.name { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto; align-items: baseline; gap: 12px; padding: 8px 0; border-top: 1px solid var(--cyan-faint); font-size: 15.5px; line-height: 1.35; }
+.name:first-child { border-top: 0; }
+.name .spelt { color: var(--cyan); }
+
 /* ---------- Activity ---------- */
 .filters { display: flex; flex-wrap: wrap; gap: 6px; }
 .filter { padding: 4px 12px; border: 1px solid var(--cyan-low); background: none; color: var(--dim); font-size: 10px; letter-spacing: 0.14em; cursor: pointer; transition: color 0.15s, background 0.15s, border-color 0.15s; }
@@ -276,5 +299,5 @@ html[data-view="dashboard"] .toast { bottom: 24px; }
 
 /* One column that may be narrower than the longest word in it (see orb.css). */
 .page, .tasks, .timeline, .shelf-pane, .shelf, .reader, .reader header, .engagement .frame, .facts, .made, .days, .day,
-.facts-list, .task-item .task-main, .rail nav, .ahead, .owed { grid-template-columns: minmax(0, 1fr); }
-.fact > span, .shelf-item strong, .meeting strong, .log li > span, .made-item > span, .read { overflow-wrap: anywhere; }
+.facts-list, .task-item .task-main, .rail nav, .ahead, .owed, .memory .frame, .group, .found, .names { grid-template-columns: minmax(0, 1fr); }
+.fact > span, .name > span, .shelf-item strong, .meeting strong, .log li > span, .made-item > span, .read { overflow-wrap: anywhere; }

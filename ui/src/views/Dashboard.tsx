@@ -13,6 +13,7 @@ import { Activity } from "./dashboard/Activity";
 import { useDashboardData } from "./dashboard/data";
 import { Engagements } from "./dashboard/Engagements";
 import { type Focus, Library } from "./dashboard/Library";
+import { Memory } from "./dashboard/Memory";
 import { Overview } from "./dashboard/Overview";
 import { Rail, SECTIONS, type SectionId } from "./dashboard/Rail";
 import { Settings } from "./dashboard/Settings";
@@ -48,6 +49,7 @@ export default function Dashboard({ jarvis }: { jarvis: Jarvis }) {
     overview: running > 0 ? running : model.app.notices.length > 0 ? "!" : undefined,
     library: library ? LIBRARY_KINDS.reduce((n, kind) => n + library[kind].length, 0) : undefined,
     engagements: data.overview?.engagements.length,
+    memory: data.facts?.length,
   };
 
   return (
@@ -82,6 +84,7 @@ export default function Dashboard({ jarvis }: { jarvis: Jarvis }) {
                 }}
               />
             )}
+            {section === "memory" && <Memory data={data} />}
             {section === "activity" && <Activity data={data} />}
             {section === "settings" && <Settings jarvis={jarvis} />}
           </motion.div>
