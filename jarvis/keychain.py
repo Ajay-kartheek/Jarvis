@@ -6,6 +6,13 @@ import keyring
 from keyring.errors import PasswordDeleteError
 
 GOOGLE_SERVICE = "jarvis.google"
+KEY_SERVICES = {"elevenlabs": "jarvis.elevenlabs"}  # other services' API keys, kept under the user name "api-key"
+KEY_USER = "api-key"
+
+
+def load_key(service: str) -> str | None:
+    """The API key stored for ``service`` (a name in KEY_SERVICES), or None."""
+    return load_secret(KEY_SERVICES[service], KEY_USER)
 
 
 def save_secret(service: str, username: str, secret: str) -> None:

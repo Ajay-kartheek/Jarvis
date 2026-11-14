@@ -177,6 +177,32 @@ def auth_status() -> None:
         raise typer.Exit(1)
 
 
+@app.command("key")
+def key_command(
+    service: Annotated[str, typer.Argument(help="Whose key: elevenlabs.")],
+) -> None:
+    """Keep an API key in the Keychain. It is pasted into a macOS dialog, so it never passes through a terminal or
+    a chat, and it is never shown."""
+    import subprocess
+
+    from jarvis import keychain
+
+    if service not in keychain.KEY_SERVICES:
+        typer.secho(f"Unknown service {service!r}. Known: {', '.join(keychain.KEY_SERVICES)}", fg=typer.colors.RED)
+        raise typer.Exit(2)
+    script = (
+        f'text returned of (display dialog "Paste your {service} API key. Jarvis keeps it in the Keychain." '
+        'default answer "" with hidden answer with title "Jarvis" buttons {"Cancel", "Save"} default button "Save")'
+    )
+    asked = subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True, text=True)
+    key = asked.stdout.strip()
+    if asked.returncode != 0 or not key:
+        typer.echo("Nothing was saved.")
+        raise typer.Exit(1)
+    keychain.save_secret(keychain.KEY_SERVICES[service], keychain.KEY_USER, key)
+    typer.echo(f"Saved the {service} key in the Keychain ({len(key)} characters).")
+
+
 @app.command("status")
 def status() -> None:
     """Show what the local copy holds and when each source last synced."""
