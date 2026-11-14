@@ -22,6 +22,7 @@ type Look = Record<(typeof KEYS)[number], number>;
  */
 const LOOK: Record<OrbState, Look> = {
   idle: { turn: 0.15, flow: 0.6, amp: 0.03, freq: 2.2, glow: 0.55, rings: 0.2 },
+  ready: { turn: 0.18, flow: 0.85, amp: 0.042, freq: 2.4, glow: 0.74, rings: 0.3 },
   listening: { turn: 0.25, flow: 1.2, amp: 0.07, freq: 2.8, glow: 0.8, rings: 0.5 },
   thinking: { turn: 1.1, flow: 3.2, amp: 0.05, freq: 6.5, glow: 0.9, rings: 2.6 },
   speaking: { turn: 0.3, flow: 2.2, amp: 0.16, freq: 3.4, glow: 1, rings: 0.8 },

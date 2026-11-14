@@ -2,13 +2,19 @@
 
 declare global {
   interface Window {
-    /** Set by the page, called by the Jarvis app each time it brings its panel forward. */
-    jarvisNative?: { onShow?: (reason: string) => void };
+    /**
+     * Set by the page, called by the Jarvis app. `onShow`: each time it brings its panel forward.
+     * `onPointer`: when the mouse comes onto the panel or leaves it, if the app tells (a window that is
+     * not in front is not told by the system, so the page cannot always know by itself).
+     */
+    jarvisNative?: { onShow?: (reason: string) => void; onPointer?: (inside: boolean) => void };
     webkit?: { messageHandlers?: { jarvis?: { postMessage: (message: unknown) => void } } };
   }
 }
 
-export type NativeAction = "hide" | "show" | "quit" | "dashboard" | "voice_start" | "voice_stop";
+export type NativeAction = "hide" | "show" | "quit" | "dashboard" | "voice_start" | "voice_stop" | "size";
+/** The panel's two forms: the whole panel, or a small square that shows only the orb. */
+export type PanelSize = "mini" | "full";
 export type View = "orb" | "dashboard";
 
 const QUERY = new URLSearchParams(location.search);
@@ -23,10 +29,26 @@ export const SCENE = QUERY.get("scene");
 export const IN_APP = Boolean(window.webkit?.messageHandlers?.jarvis);
 
 /** Asks the app to do something. Returns false in a plain browser, where there is nobody to ask. */
-export function native(action: NativeAction): boolean {
+export function native(action: NativeAction, detail: Record<string, string> = {}): boolean {
   const port = window.webkit?.messageHandlers?.jarvis;
   if (!port) return false;
-  port.postMessage({ action });
+  port.postMessage({ ...detail, action });
+  return true;
+}
+
+/** Somebody answers a request for the panel's size: the app, or the demo standing in for it. */
+export const SIZED = IN_APP || DEMO;
+
+/**
+ * Asks the app for the small orb or the whole panel. The app resizes its window and then says which
+ * form the page is in, with the class `jarvis-mini` on <html>: the page never assumes it was heard.
+ * In the demo, in a browser, there is no app to answer, so the demo marks the page itself: the window
+ * cannot shrink, but the small orb is shown on its own in the middle of it.
+ */
+export function resize(mode: PanelSize): boolean {
+  if (native("size", { mode })) return true;
+  if (!DEMO) return false;
+  document.documentElement.classList.toggle("jarvis-mini", mode === "mini");
   return true;
 }
 

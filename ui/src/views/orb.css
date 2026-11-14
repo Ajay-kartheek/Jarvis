@@ -1,4 +1,5 @@
-/* View 1: the orb. A column: header, the orb, one live line, what has been said and made, the box. */
+/* View 1: the orb. A column: header, the orb, one live line, what waits for a yes, then what Jarvis
+   said last with everything it made and the conversation before, and the box. */
 
 .orb-view {
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
@@ -20,8 +21,8 @@
 .orb-view > * { flex: none; min-width: 0; }
 /* While there is nothing to read, the orb and its line sit in the middle of the free room: the spacer
    above them and the (empty) feed below share it. Flex-grow is what animates when the first thing arrives. */
-.orb-view > .spacer { flex: 0 1 0; min-height: 0; transition: flex-grow 0.6s var(--ease); }
-.orb-view[data-mode="hero"] > .spacer { flex-grow: 1; }
+.orb-view > .spacer { flex: 0 1 0; min-height: 0; margin-top: -8px; transition: flex-grow 0.6s var(--ease), margin-top 0.6s var(--ease); } /* empty: it must not cost a second gap */
+.orb-view[data-mode="hero"] > .spacer { flex-grow: 1; margin-top: 0; }
 
 /* ---------- Header ---------- */
 .bar { position: relative; display: flex; align-items: center; gap: 10px; padding-bottom: 8px; }
@@ -76,6 +77,22 @@
   transition: opacity 0.4s;
 }
 .orb[data-state="listening"] .orb-core::before { opacity: 0.8; }
+.orb[data-state="ready"] .orb-core::before { opacity: 0.7; }
+.orb[data-state="ready"] .orb-core::after { /* a ring going out, slowly, again and again: the ear is open */
+  content: "";
+  position: absolute;
+  inset: 2%;
+  border: 1px solid var(--cyan-mid);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  animation: sonar 4.2s ease-out infinite;
+}
+@keyframes sonar {
+  0% { opacity: 0; scale: 0.55; }
+  12% { opacity: 0.55; }
+  70%, 100% { opacity: 0; scale: 1.1; }
+}
 .orb[data-state="speaking"] .orb-core::before { opacity: 1; }
 .orb[data-state="thinking"] .orb-core::before { animation: breathe 0.9s ease-in-out infinite; }
 .orb[data-state="call"] .orb-core::before { opacity: 0.4; }
@@ -119,9 +136,10 @@
 .callbar-actions kbd { opacity: 0.6; font: 400 11px var(--mono); letter-spacing: 0; }
 
 /* ---------- The live line: what is happening right now ---------- */
-.live {
+.live { /* one line for the hint or a step; the user's words may take more */
   --lines: 2;
-  height: calc(var(--lines) * 1.3em);
+  min-height: 1.3em;
+  max-height: calc(var(--lines) * 1.3em);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -133,15 +151,21 @@
 .live-text { color: var(--bright); white-space: pre-line; }
 .live[data-kind="hint"] .live-text, .live-text[data-empty] { color: var(--dim); font-size: 16px; }
 .live[data-kind="heard"] .live-text { color: var(--cyan); }
-.live[data-kind="error"] .live-text { color: var(--amber); }
 .live-text.thinking { justify-content: center; padding: 0; overflow: visible; }
 .live-text.thinking::after { display: none; }
 
 /* ---------- Everything below the orb scrolls ---------- */
-.feed {
-  flex: 1 1 0; /* takes what is left; its own content must not count when the others are squeezed */
+.feed-box { /* takes what is left; what is in it must not count when the others are squeezed */
+  position: relative;
+  flex: 1 1 0;
   min-height: 64px;
-  margin: 0 -10px; /* the padding leaves room for the frames' glow, which the scroll area would clip */
+  margin: 0 -10px; /* the feed's padding leaves room for the frames' glow, which the scroll area would clip */
+  display: flex;
+  flex-direction: column;
+}
+.feed {
+  flex: 1 1 0;
+  min-height: 0;
   padding: 8px 10px 18px;
   overflow-y: auto;
   mask-image: linear-gradient(transparent, #000 8px, #000 calc(100% - 16px), transparent); /* what scrolls away fades */
@@ -152,18 +176,75 @@
   scrollbar-color: var(--cyan-low) transparent;
 }
 .feed > * { flex: none; }
+.orb-view > .composer { margin-top: auto; } /* at the bottom also when the feed has given its room away */
 
+/* ---------- The answer: what Jarvis said last, in full ---------- */
+.latest { display: grid; grid-template-columns: minmax(0, 1fr); gap: 5px; padding: 0 2px 6px; }
+.asked { /* the message it answers: two lines of it, the rest on a click */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: var(--dim);
+  font-size: 15px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.asked[data-whole] { display: block; }
+.asked b { margin-right: 8px; color: var(--cyan-mid); font: 500 10px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; }
+.latest .said { color: var(--bright); font-size: 19px; line-height: 1.36; overflow-wrap: anywhere; }
+.latest .said li { margin-bottom: 3px; }
+.latest .said pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; } /* nothing of an answer is out of sight sideways */
+.latest[data-short] { text-align: center; text-wrap: balance; } /* a short answer is set like a spoken line, under the orb */
+.latest[data-phase="error"] .said { color: var(--amber); }
+
+.feed-box:has(> .more-below) .feed { /* the answer runs on below: its last lines fade under the button that says so */
+  mask-image: linear-gradient(transparent, #000 8px, #000 calc(100% - 52px), transparent calc(100% - 8px));
+}
+.more-below { /* at the lower edge of something that has to be read to its end, while its end is out of sight */
+  position: absolute;
+  left: 50%;
+  bottom: 5px;
+  z-index: 2;
+  translate: -50% 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px 2px 12px;
+  border: 1px solid var(--cyan-mid);
+  background: rgba(5, 12, 18, 0.94);
+  box-shadow: var(--glow);
+  color: var(--cyan);
+  font: 500 10px/16px var(--mono);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.more-below:hover { color: var(--bright); border-color: var(--cyan); }
+
+/* ---------- The conversation: in a call all of it, otherwise what came before the answer ---------- */
 .trail-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
 .trail-list { display: grid; }
-.trail .entry { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 8px; padding: 5px 0; font-size: 15.5px; line-height: 1.32; }
-.trail .entry + .entry { border-top: 1px solid var(--cyan-faint); }
-.trail .entry b { color: var(--dim); font: 500 10px/21px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; }
-.trail .entry[data-who="jarvis"] b { color: var(--cyan); }
+.trail-list .entry { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 8px; padding: 5px 0; font-size: 15.5px; line-height: 1.32; }
+.trail-list .entry + .entry { border-top: 1px solid var(--cyan-faint); }
+.trail-list .entry b { color: var(--dim); font: 500 10px/21px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; }
+.trail-list .entry[data-who="jarvis"] b { color: var(--cyan); }
 .entry-text { overflow: hidden; color: var(--bright); white-space: pre-line; }
-.trail .entry[data-who="user"] .entry-text { color: var(--dim); }
-.entry-text[data-tall]:not([data-open]) { max-height: 150px; cursor: pointer; mask-image: linear-gradient(#000 75%, transparent); }
+.trail-list .entry[data-who="user"] .entry-text { color: var(--dim); }
+.entry-text[data-tall]:not([data-open]) { max-height: var(--clamp, 150px); cursor: pointer; mask-image: linear-gradient(#000 75%, transparent); }
 .entry-text[data-tall][data-open] { max-height: none; cursor: pointer; }
 .entry-text.thinking { padding: 2px 0; font-size: 11px; }
+
+.earlier { margin-top: 4px; padding: 8px 2px 0; border-top: 1px solid var(--cyan-faint); }
+.earlier .trail-list .entry { font-size: 14.5px; }
+.earlier .entry-text { --clamp: 66px; color: var(--text); }
+.earlier .entry-text[data-tall] { cursor: auto; } /* it opens with the button under it */
+.earlier .entry-text .md { color: inherit; font-size: inherit; line-height: inherit; }
+.earlier .entry-text .md > * { margin-bottom: 4px; }
+.earlier .trail-list .entry[data-who="jarvis"] b { color: var(--cyan-mid); }
+.past { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; }
+.past .more { margin-top: 2px; }
 
 /* ---------- Cards ---------- */
 .cards { position: relative; display: grid; gap: 8px; }
@@ -174,6 +255,15 @@
 .card-head .icon { flex: none; margin-right: -6px; }
 .card:has(.tag[data-kind="questions"]) { --glow-c: rgba(255, 179, 71, 0.28); }
 .card:has(.tag[data-kind="questions"]) .frame { --aug-border-bg: rgba(255, 179, 71, 0.65); }
+.card:has(.tag[data-kind="proposal"]) { --glow-c: rgba(63, 224, 255, 0.3); }
+.card:has(.tag[data-kind="proposal"]) .frame { --aug-border-bg: var(--cyan-mid); }
+.card-head h3:empty { min-height: 1px; } /* a card without a title: the tag left, the cross right */
+
+/* Something Jarvis noticed: one sentence, and what can be done about it with one press. */
+.noticed { font-size: 17px; line-height: 1.32; }
+.choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.card-head + .choices { margin-top: 0; } /* its sentence stands under the orb already */
+.choices .btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 
 .questions { display: grid; gap: 6px; padding-left: 20px; list-style: decimal; color: var(--bright); font-size: 16px; line-height: 1.3; }
 .questions li::marker { color: var(--amber); font: 500 12px var(--mono); }
@@ -203,20 +293,62 @@
 .task-main { display: grid; min-width: 0; line-height: 1.2; }
 .task-main strong { overflow: hidden; color: var(--bright); font-size: 16px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
 .task-step { overflow: hidden; color: var(--dim); font: 400 12px var(--mono); white-space: nowrap; text-overflow: ellipsis; }
+.task-main .path { margin-top: 1px; color: var(--cyan-mid); font-size: 11px; text-decoration: none; }
+.task-main a.path:hover { color: var(--bright); text-decoration: underline; }
 .task-sweep { position: absolute; inset: auto 0 0; height: 1px; background: linear-gradient(90deg, transparent, var(--cyan), transparent); animation: sweep 1.8s linear infinite; }
 
-.fold { position: relative; overflow: hidden; }
-.fold[data-tall]:not([data-open])::after { /* the last visible line fades out: there is more below */
-  content: "";
-  position: absolute;
-  inset: auto 0 0;
-  height: 34px;
-  background: linear-gradient(transparent, rgb(8, 20, 30));
-  pointer-events: none;
-}
-.more { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; padding-left: 0; }
 .card .path { margin-top: 6px; }
 .btn.open { margin-top: 10px; }
+
+/* ---------- An approval: what waits for the user's yes ---------- */
+/* Amber, right under the orb, and it keeps its buttons on screen: when the window is short it is the
+   text inside that scrolls, and the card gives way before the orb does. */
+.orb-view > .approval { --glow-c: rgba(255, 179, 71, 0.4); flex: 0 100 auto; display: flex; flex-direction: column; min-height: 0; }
+.approval .frame {
+  --aug-border-all: 2px;
+  --aug-border-bg: var(--amber);
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  height: auto;
+  min-height: 0;
+  padding: 10px 12px;
+  background: rgba(22, 16, 8, 0.9);
+}
+.approval-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+.approval .tag { color: var(--amber); }
+.approval-hint { color: var(--dim); font-size: 14px; line-height: 1.2; } /* the other way to answer, beside the words that ask */
+.approval h3 { color: var(--bright); font: 600 19px/1.15 var(--ui); overflow-wrap: anywhere; }
+.approval-body { position: relative; flex: 0 1 auto; display: flex; flex-direction: column; min-height: 58px; }
+.approval-scroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  padding: 8px 10px;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 179, 71, 0.28);
+  background: rgba(0, 0, 0, 0.4);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 179, 71, 0.5) transparent;
+}
+.approval-scroll:focus-visible { outline: 1px solid var(--amber); outline-offset: 0; }
+.approval-scroll .md { overflow-wrap: anywhere; }
+.approval-scroll .md pre { overflow-x: visible; border-left-color: var(--amber); white-space: pre-wrap; overflow-wrap: anywhere; } /* the whole command, without scrolling sideways */
+.approval-scroll .md pre code { font-size: 13px; }
+.mail-head { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; margin-bottom: 8px; padding-bottom: 7px; border-bottom: 1px dashed rgba(255, 179, 71, 0.35); }
+.mail-head div { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 8px; }
+.mail-head dt { color: var(--dim); font: 500 10px/20px var(--mono); letter-spacing: 0.1em; text-transform: uppercase; }
+.mail-head dd { color: var(--bright); font: 400 14px/20px var(--read); overflow-wrap: anywhere; }
+.mail-text { color: var(--bright); font: 400 14px/1.5 var(--read); white-space: pre-wrap; overflow-wrap: anywhere; }
+.approval-body:has(> .more-below) .approval-scroll { mask-image: linear-gradient(#000 calc(100% - 40px), transparent calc(100% - 4px)); }
+.approval-body .more-below { bottom: 4px; border-color: var(--amber); box-shadow: 0 0 10px rgba(255, 179, 71, 0.45); color: var(--amber); }
+.approval-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.approval-actions .btn { padding: 5px 14px; }
+.approval-actions .yes { --aug-border-bg: var(--amber); background: var(--amber); color: #1b1204; }
+.approval-actions .yes:hover:not(:disabled) { background: #ffc875; color: #1b1204; }
+.approval-actions .ghost { margin-left: auto; }
+/* While a yes is asked for, the orb steps back for it, as it does for a call. */
+.orb-view[data-asking]:not([data-mode="call"]) { --stage-h: clamp(84px, 15dvh, 124px); }
 
 /* ---------- During a call ---------- */
 .them .frame { display: grid; gap: 4px; }
@@ -324,8 +456,34 @@
 }
 @media (max-height: 640px) {
   .live { font-size: 17px; }
+  /* The window is short and something is on screen to read: the hint for how to talk waits, and its room goes to
+     what is being read. (With nothing else there, it stays: that is what the hero view is for.) */
+  .orb-view:not([data-mode="hero"]) .live[data-kind="hint"] { display: none; }
   .orb-view[data-mode="hero"] { --stage-h: clamp(170px, 40dvh, 430px); }
   .orb-view[data-mode="hero"] .live { --lines: 2; }
+  .latest .said { font-size: 18px; }
+  /* A yes is asked for and the window is short: everything else under the orb waits its turn.
+     Not during a call: what to say next must stay in sight, and the two share the room. */
+  .orb-view[data-asking]:not([data-mode="call"]) > .feed-box { display: none; }
+}
+@media (max-height: 560px) {
+  .asked { -webkit-line-clamp: 1; } /* what was asked is only a reminder here: one line */
+  /* A yes is asked for during a call and the window is this short: of the call's own pieces there would be a
+     sliver of the other side's words, no more. The question gets the room instead, with its buttons whole. */
+  .orb-view[data-asking][data-mode="call"] > .feed-box { display: none; }
+  /* A mail is long, and the window is not: its head takes less room. */
+  .approval-scroll { padding: 6px 10px; }
+  .mail-head { margin-bottom: 6px; padding-bottom: 5px; }
+  .mail-head dt, .mail-head dd { line-height: 18px; }
+}
+@media (max-height: 560px) { /* and in the shortest windows the orb is only a mark above what is asked */
+  .orb-view[data-asking]:not([data-mode="call"]) { --stage-h: 58px; }
+  .orb-view[data-asking]:not([data-mode="call"]) > .stage { min-height: 52px; }
+  .orb-view[data-asking]:not([data-mode="call"]) .orb-state { display: none; }
+  .orb-view[data-asking]:not([data-mode="call"]) .orb-core { height: 100%; }
+}
+@media (max-width: 520px) { /* three buttons in one row */
+  .approval-actions .btn { padding: 4px 10px; font-size: 12.5px; letter-spacing: 0.12em; }
 }
 @media (max-width: 420px) {
   .orb-view { padding-left: 10px; padding-right: 10px; }
@@ -333,7 +491,36 @@
   .brand { letter-spacing: 0.26em; }
 }
 
+/* ---------- The small orb ---------- */
+/* The app has shrunk the panel to a small square and says so with this class. Only the orb is left,
+   with its state under it; a click anywhere brings the panel back. The square is the window's size
+   in the end, and stays in the middle of the window while that is still on its way. */
+html.jarvis-mini .orb-view { max-width: none; padding: 0; }
+html.jarvis-mini .orb-view > :not(.stage) { display: none; }
+html.jarvis-mini .orb-view > .stage {
+  position: fixed;
+  inset: 0;
+  width: 150px;
+  height: 150px;
+  min-height: 0;
+  margin: auto;
+  cursor: pointer;
+  transition: none;
+}
+html.jarvis-mini .stage:focus-visible { outline: none; }
+html.jarvis-mini .stage:focus-visible .orb-state { color: var(--bright); }
+html.jarvis-mini .orb { inset: 9px 9px 7px; }
+html.jarvis-mini .orb-wings, html.jarvis-mini .callbar { display: none; }
+html.jarvis-mini .orb-state { font-size: 9px; letter-spacing: 0.14em; }
+html.jarvis-mini .orb-state[data-note] { color: var(--amber); }
+html.jarvis-mini body::after { display: none; } /* the scanline is as tall as this whole window */
+/* On the way back the window is still small for a moment: until there is room, the orb alone is shown,
+   not the whole panel squeezed into a corner. (Only in the app, whose panel is never this small otherwise.) */
+@media (max-width: 300px), (max-height: 300px) {
+  html.jarvis-native:not(.jarvis-mini) .orb-view > :not(.stage) { visibility: hidden; }
+}
+
 /* Grids of one column, whose column may be narrower than the longest word in it. Without minmax(0, 1fr) a
    long address or link stretches the column, and with it the whole panel, past the window. */
 .trail-list, .cards, .questions, .task-main, .them .frame, .history .frame { grid-template-columns: minmax(0, 1fr); }
-.questions li, .entry-text, .live-text { overflow-wrap: anywhere; }
+.questions li, .entry-text, .live-text, .noticed { overflow-wrap: anywhere; }

@@ -1,15 +1,21 @@
-// Engagements: the people and folders of each, what Jarvis made for it, and what it remembers.
-// Each remembered thing can be deleted.
+// Engagements: for each, its people and folders, the dossier Jarvis keeps on it (what it is, where
+// things stand, what was decided), the promises made in it, what Jarvis was told to remember, and
+// what it made. Each remembered thing can be deleted. The dossier and the promises are shown when
+// the service has them.
 
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { type Engagement, type Fact, type Item, LIBRARY_KINDS, type LibraryKind } from "../../api";
+import { type Engagement, type Fact, type Item, LIBRARY_KINDS, type LibraryKind, type PromiseEntry } from "../../api";
+import { Folded } from "../../components/Folded";
 import { ago, parseTime } from "../../format";
+import { useNow } from "../../hooks";
+import { PromiseList } from "./Ahead";
 import type { DashboardData } from "./data";
 import type { Focus } from "./Library";
 import { Empty, PageHead, Panel } from "./parts";
 
 const MADE_SHOWN = 4;
+const DOSSIER_PX = 400; // what shows of a dossier until it is opened: its first parts, and a short one whole
 const SURE_MS = 3000; // after the first press, forgetting waits this long for the second
 
 interface Props {
@@ -23,8 +29,15 @@ interface Made {
 }
 
 export function Engagements({ data, onOpen }: Props) {
+  const now = useNow(60_000);
   const engagements = data.overview?.engagements ?? data.today?.engagements ?? [];
   const facts = data.facts ?? [];
+  const everyPromise = Array.isArray(data.promises) ? data.promises : [];
+  // The dossier brings the engagement's promises with it; without one, they are picked from the list of all.
+  const promised = (name: string): PromiseEntry[] => {
+    const own = data.dossiers?.[name]?.promises;
+    return Array.isArray(own) ? own : everyPromise.filter((promise) => promise.engagement === name);
+  };
   const known = new Set(engagements.map((engagement) => engagement.name));
   // What does not belong to a known engagement is still shown, under General.
   const general = facts.filter((fact) => !fact.engagement || !known.has(fact.engagement));
@@ -37,7 +50,7 @@ export function Engagements({ data, onOpen }: Props) {
 
   return (
     <>
-      <PageHead title="Engagements" sub="The work Jarvis keeps apart, and what it has been told to remember about each." />
+      <PageHead title="Engagements" sub="The work Jarvis keeps apart: what it knows about each, what was promised, and what it was told to remember." />
       {data.overview === null && data.today === null && <Empty>Reading…</Empty>}
       <div className="engagements">
         {engagements.map((engagement, i) => (
@@ -46,6 +59,9 @@ export function Engagements({ data, onOpen }: Props) {
             engagement={engagement}
             facts={facts.filter((fact) => fact.engagement === engagement.name)}
             made={made(engagement.name)}
+            dossier={data.dossiers?.[engagement.name]?.dossier ?? ""}
+            promises={promised(engagement.name)}
+            now={now}
             i={i}
             onOpen={onOpen}
             onForget={data.forget}
@@ -65,6 +81,9 @@ function EngagementCard({
   engagement,
   facts,
   made,
+  dossier,
+  promises,
+  now,
   i,
   onOpen,
   onForget,
@@ -72,6 +91,10 @@ function EngagementCard({
   engagement: Engagement;
   facts: Fact[];
   made: Made[];
+  /** Markdown; empty when there is none. */
+  dossier: string;
+  promises: PromiseEntry[];
+  now: number;
   i: number;
   onOpen: Props["onOpen"];
   onForget: DashboardData["forget"];
@@ -92,6 +115,22 @@ function EngagementCard({
             </span>
           ))}
         </p>
+      )}
+
+      {dossier.trim() && (
+        <>
+          <h3 className="label">Dossier</h3>
+          <div className="dossier">
+            <Folded body={dossier} limit={DOSSIER_PX} className="md read" />
+          </div>
+        </>
+      )}
+
+      {promises.length > 0 && (
+        <>
+          <h3 className="label">Promises</h3>
+          <PromiseList promises={promises} now={now} engagement={false} />
+        </>
       )}
 
       <h3 className="label">What Jarvis remembers</h3>

@@ -1,8 +1,11 @@
-// Settings: the three switches, and what this Mac can do.
+// Settings: the switches, and what this Mac can do. Most switches are the service's; the one for the
+// small orb belongs to the panel alone and is kept on this Mac by the page (see mini.ts).
 
 import { useState } from "react";
 import type { Settings as SettingsShape } from "../../api";
+import { SIZED } from "../../bridge";
 import { Switch } from "../../components/Switch";
+import { useSmallOrbSetting } from "../../mini";
 import type { Jarvis } from "../../store";
 import { PageHead, Panel } from "./parts";
 
@@ -24,11 +27,26 @@ const SWITCHES: { key: keyof SettingsShape; label: string; about: string }[] = [
     label: "Auto prep",
     about: "Prepare for client meetings ahead of time, without being asked.",
   },
+  {
+    key: "wake_word",
+    label: "Hey Jarvis",
+    about:
+      "Listen for “Hey Jarvis” while nothing else is going on, so you can talk without holding the key. " +
+      "The listening happens on this Mac, and never during a call.",
+  },
+  {
+    key: "proactive",
+    label: "Speak up",
+    about:
+      "After new mail arrives, tell you when a meeting today changed, something you watch for happened, " +
+      "or someone needs an answer today. A few times a day at most, and never during a call.",
+  },
 ];
 
 export function Settings({ jarvis }: { jarvis: Jarvis }) {
   const { app } = jarvis.model;
   const [forgotten, setForgotten] = useState(false);
+  const [smallOrb, setSmallOrb] = useSmallOrbSetting();
 
   return (
     <>
@@ -42,9 +60,21 @@ export function Settings({ jarvis }: { jarvis: Jarvis }) {
                 <strong>{label}</strong>
                 <p className="quiet">{about}</p>
               </div>
-              <Switch on={app.settings[key]} onChange={(on) => void jarvis.saveSettings({ [key]: on })} title={label} />
+              <Switch on={app.settings[key] === true} onChange={(on) => void jarvis.saveSettings({ [key]: on })} title={label} />
             </li>
           ))}
+          <li>
+            <div>
+              <strong>Small orb</strong>
+              <p className="quiet">
+                Shrink the panel to a small orb after 25 seconds with nothing to show. It opens again when there is
+                something to read or to answer, and when you click it.
+                {/* The setting is kept in this window's own storage, which the app's two windows share and a browser tab does not. */}
+                {!SIZED && " Only the panel in the Jarvis app can shrink: in a browser this changes nothing."}
+              </p>
+            </div>
+            <Switch on={smallOrb} onChange={setSmallOrb} title="Small orb" />
+          </li>
         </ul>
       </Panel>
 

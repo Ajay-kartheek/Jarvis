@@ -30,12 +30,15 @@ export function TodaySection({ data }: { data: DashboardData }) {
         {today && today.meetings.length === 0 && <Empty>No meetings today.</Empty>}
         <ol className="timeline">
           {today?.meetings.map((meeting, i) => {
-            const live = parseTime(meeting.start) <= now && now < parseTime(meeting.end);
+            // A meeting the user said is off is still listed, struck through: the calendar has it, Jarvis leaves it alone.
+            const off = meeting.skipped === true;
+            const live = !off && parseTime(meeting.start) <= now && now < parseTime(meeting.end);
             return (
               <motion.li
                 key={`${meeting.start}:${meeting.title}`}
                 className="meeting"
                 data-now={live || undefined}
+                data-off={off || undefined}
                 initial={{ opacity: 0, x: -8 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ delay: 0.05 * i }}
@@ -48,6 +51,7 @@ export function TodaySection({ data }: { data: DashboardData }) {
                   <strong>{meeting.title}</strong>
                   {meeting.engagement && <span className="chip">{meeting.engagement}</span>}
                   {live && <span className="flag">now</span>}
+                  {off && <span className="flag off">off</span>}
                   {meeting.people.length > 0 && <p className="quiet">{meeting.people.join(" · ")}</p>}
                 </div>
               </motion.li>

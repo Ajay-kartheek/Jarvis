@@ -1,8 +1,21 @@
 // What the dashboard reads from the server, kept fresh: again when Jarvis does or makes something,
-// and every few minutes in case a message was missed.
+// and every few minutes in case a message was missed. Reminders, promises and dossiers are parts
+// the service may not have yet: one it does not have reads as null, and its place stays empty.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Activity, Api, Fact, Library, Overview, Today } from "../../api";
+import {
+  type Activity,
+  type Api,
+  type Dossier,
+  type Engagement,
+  type Fact,
+  type Library,
+  type Overview,
+  type PromiseEntry,
+  type Reminder,
+  type Today,
+  optional,
+} from "../../api";
 
 const REFRESH_MS = 3 * 60_000;
 const SETTLE_MS = 700; // events come in bursts; one read after each burst is enough
@@ -14,6 +27,11 @@ interface Loaded {
   library: Library | null;
   facts: Fact[] | null;
   activity: Activity[] | null;
+  /** Null: not read yet, or the service has no such thing. Either way there is nothing to show. */
+  reminders: Reminder[] | null;
+  promises: PromiseEntry[] | null;
+  /** By engagement name; an engagement the service has no dossier for is not in it. */
+  dossiers: Record<string, Dossier> | null;
 }
 
 export interface DashboardData extends Loaded {
@@ -25,14 +43,34 @@ export interface DashboardData extends Loaded {
   forget: (id: Fact["id"]) => Promise<void>;
 }
 
-const NOTHING: Loaded = { overview: null, today: null, library: null, facts: null, activity: null };
+const NOTHING: Loaded = {
+  overview: null,
+  today: null,
+  library: null,
+  facts: null,
+  activity: null,
+  reminders: null,
+  promises: null,
+  dossiers: null,
+};
 const reason = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/** The dossier of each engagement that has one. */
+async function readDossiers(api: Api, engagements: Engagement[]): Promise<Record<string, Dossier>> {
+  const found = await Promise.all(engagements.map(({ name }) => optional(api.engagement(name))));
+  const dossiers: Record<string, Dossier> = {};
+  engagements.forEach(({ name }, i) => {
+    const dossier = found[i];
+    if (dossier) dossiers[name] = dossier;
+  });
+  return dossiers;
+}
 
 /**
  * `fresh` goes up whenever the page hears of a task, card, note, brief or state change, `made` when
  * something was made or dropped. A task's every step changes `fresh` but not the library, so the
- * library, the brief, and what is remembered are read again only when `made` moved, or every few
- * minutes; the overview and the activity are read each time.
+ * library, the brief, the dossiers and what is remembered are read again only when `made` moved, or
+ * every few minutes; the overview, the activity, the reminders and the promises are read each time.
  */
 export function useDashboardData(api: Api, signal: { fresh: number; made: number }, warn: (text: string) => void): DashboardData {
   const [data, setData] = useState<Loaded>(NOTHING);
@@ -75,15 +113,20 @@ export function useDashboardData(api: Api, signal: { fresh: number; made: number
     const asked = wanted.current;
     const all = asked !== done.current;
     const read = <T>(job: () => Promise<T>, ask: boolean) => (ask ? job() : Promise.resolve(undefined));
+    const overviewRead = api.overview();
     Promise.allSettled([
-      api.overview(),
+      overviewRead,
       read(() => api.today(), all),
       read(() => api.library(), all),
       read(() => api.facts(), all),
       api.activity(ACTIVITY_ROWS),
+      optional(api.reminders()),
+      optional(api.promises()),
+      // The overview says which engagements there are. If it fails, it is the one to report: not this.
+      read(() => overviewRead.then(({ engagements }) => readDossiers(api, engagements), () => undefined), all),
     ]).then((results) => {
       if (!current) return;
-      const [overview, today, library, facts, activity] = results;
+      const [overview, today, library, facts, activity, reminders, promises, dossiers] = results;
       // One that failed keeps what it had, and so does one that was not asked for; the others are shown.
       const take = <T,>(result: PromiseSettledResult<T | undefined>, old: T | null) =>
         result.status === "fulfilled" && result.value !== undefined ? result.value : old;
@@ -93,6 +136,9 @@ export function useDashboardData(api: Api, signal: { fresh: number; made: number
         library: take(library, old.library),
         facts: take(facts, old.facts),
         activity: take(activity, old.activity),
+        reminders: take(reminders, old.reminders),
+        promises: take(promises, old.promises),
+        dossiers: take(dossiers, old.dossiers),
       }));
       const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
       setError(failed ? reason(failed.reason) : "");

@@ -12,6 +12,7 @@ const Orb = lazy(() => import("./Orb"));
 
 const LABEL: Record<OrbState, string> = {
   idle: "Standing by",
+  ready: "Listening for you",
   listening: "Listening",
   thinking: "Working",
   speaking: "Speaking",
@@ -25,9 +26,11 @@ interface Props {
   state: OrbState;
   /** Small and quiet, beside the call's title: no wings, no label. */
   compact?: boolean;
+  /** Said under the orb in place of the state's own words. */
+  label?: string;
 }
 
-export const OrbStage = memo(function OrbStage({ state, compact = false }: Props) {
+export const OrbStage = memo(function OrbStage({ state, compact = false, label }: Props) {
   const stage = useRef<HTMLDivElement>(null);
   const core = useRef<HTMLDivElement>(null);
   const wings = useRef<HTMLCanvasElement>(null);
@@ -132,8 +135,14 @@ export const OrbStage = memo(function OrbStage({ state, compact = false }: Props
           </Suspense>
         </Guard>
       </div>
-      <motion.span key={state} className="orb-state" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}>
-        {LABEL[state]}
+      <motion.span
+        key={label ?? state}
+        className="orb-state"
+        data-note={label ? "" : undefined}
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+      >
+        {label ?? LABEL[state]}
       </motion.span>
     </div>
   );

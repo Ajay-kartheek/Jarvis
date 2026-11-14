@@ -1,7 +1,7 @@
 // Made-up data for the demo, and for the dashboard when no server answers. Every name here is invented.
 // Times are worked out from now, so "a meeting happening now" is always happening now.
 
-import type { Activity, Counts, Engagement, Fact, Item, Library, SourceStatus, Today } from "./api";
+import type { Activity, Counts, Dossier, Engagement, Fact, Item, Library, PromiseEntry, Reminder, SourceStatus, Today } from "./api";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -143,6 +143,14 @@ export function demoToday(): Today {
         engagement: "Borealis",
         people: ["Meera"],
       },
+      {
+        title: "Atlas cutover rehearsal",
+        start: at(165 * MINUTE),
+        end: at(225 * MINUTE),
+        engagement: "Atlas",
+        people: ["Ravi"],
+        skipped: true, // Ravi moved it to Thursday
+      },
       { title: "Planning hour", start: at(240 * MINUTE), end: at(300 * MINUTE), engagement: null, people: [] },
     ],
     engagements: ENGAGEMENTS,
@@ -272,4 +280,74 @@ export function demoActivity(): Activity[] {
     { at: at(-6 * DAY), kind: "remember", text: "Remembered for Atlas: Priya likes a written summary after every call" },
     { at: at(-9 * DAY), kind: "notes", text: "Wrote the notes for the Borealis kickoff" },
   ];
+}
+
+/** A day `days` from today at `hour`, as the server writes local times. */
+function dayAt(days: number, hour: number): Date {
+  const day = new Date();
+  day.setDate(day.getDate() + days);
+  day.setHours(hour, 0, 0, 0);
+  return day;
+}
+
+/** One reminder comes as seconds since 1970 and the others as text: the server may send either. */
+export function demoReminders(): Reminder[] {
+  return [
+    { id: 3, due: Math.round((Date.now() + 50 * MINUTE) / 1000), text: "Send the rehearsal checklist to Ravi." },
+    { id: 4, due: dayAt(1, 9).toISOString(), text: "Ask Meera for the weekend cover costs." },
+    { id: 5, due: dayAt(3, 16).toISOString(), text: "Check that the Atlas data sign-off has landed." },
+  ];
+}
+
+export function demoPromises(): PromiseEntry[] {
+  const day = (days: number) => dayAt(days, 12).toLocaleDateString("en-CA"); // local YYYY-MM-DD
+  return [
+    { id: 11, engagement: "Atlas", owner: "You", text: "Send the rehearsal checklist to Ravi.", due: day(1), status: "open" },
+    { id: 12, engagement: "Atlas", owner: "Ravi", text: "Close the two open sign-off checks.", due: day(3), status: "open" },
+    { id: 13, engagement: "Borealis", owner: "You", text: "Confirm the support terms in writing.", due: day(3), status: "open" },
+    { id: 14, engagement: "Borealis", owner: "Meera", text: "Bring the budget figures to the next call.", due: null, status: "open" },
+    { id: 9, engagement: "Atlas", owner: "Priya", text: "Send the updated migration plan.", due: day(-6), status: "done" },
+  ];
+}
+
+const DOSSIERS: Record<string, string> = {
+  Atlas: `## What it is
+Moving the Atlas reporting system to the new platform. The cutover is planned for the fourteenth.
+
+## People
+- **Priya**: sponsor. Likes a written summary after every call.
+- **Ravi**: data lead. Owns the data sign-off.
+
+## Where things stand
+- The fourteenth holds if the data sign-off lands by Friday.
+- Two of the five sign-off checks are still open.
+- The rehearsal has moved once, and nobody owns the rollback step yet.
+
+## Decisions
+- Weekend cover is a phase two item.
+- Priya decides go or no-go after the rehearsal.
+
+## Recent work
+- Notes of the last weekly sync, and a summary drafted for Priya.
+- The cutover checklist, version two.`,
+  Borealis: `## What it is
+Running support for Borealis after their move: weekday cover first, weekends in a second phase.
+
+## People
+- **Meera**: operations lead. Reviews the budget on the first of each month.
+
+## Where things stand
+- Weekday cover from nine to six is agreed, with a four hour response on priority one issues.
+- Weekend cover waits for the budget review.
+
+## Terms
+- The four hour response time holds on weekdays only.`,
+};
+
+export function demoDossier(name: string): Dossier {
+  return {
+    name,
+    dossier: DOSSIERS[name] ?? null,
+    promises: demoPromises().filter((promise) => promise.engagement === name),
+  };
 }

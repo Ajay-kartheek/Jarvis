@@ -28,11 +28,24 @@ export interface Settings {
   speak: boolean;
   /** Jarvis prepares for client meetings ahead of time without being asked. */
   auto_prep: boolean;
+  /** "Hey Jarvis" wakes it without the key. Absent on a service that has no ear. */
+  wake_word?: boolean;
+  /** Jarvis may speak up by itself about new mail. Absent on a service that never does. */
+  proactive?: boolean;
 }
 
-export type CardKind = "note" | "prep" | "questions" | "draft" | "file";
+export type CardKind = "note" | "prep" | "questions" | "draft" | "file" | "approval" | "proposal";
 
-/** Something Jarvis puts in front of the user: a result, a draft, or questions it needs answered. */
+/** One thing the user can answer a proposal with: pressing it sends `say` as a typed message. */
+export interface CardAction {
+  label: string;
+  say: string;
+}
+
+/**
+ * Something Jarvis puts in front of the user: a result, a draft, questions it needs answered,
+ * something it will only do after a yes (approval), or something it noticed (proposal).
+ */
 export interface Card {
   id: string;
   kind: CardKind;
@@ -43,7 +56,24 @@ export interface Card {
   questions?: string[];
   link?: string | null;
   path?: string | null;
+  /** approval: the id of the question it puts, as `state.approvals` lists it. */
+  approval?: string | null;
+  /** proposal: up to three ways to answer it. */
+  actions?: CardAction[];
+  /** proposal: the number of the mail it is about, if any. The actions already say what to do with it. */
+  mail?: number | null;
 }
+
+/** A yes Jarvis is waiting for. `kind` says what it would do: send_mail, run, write, fetch, read. */
+export interface Approval {
+  id: string;
+  kind: string;
+  title: string;
+  detail: string; // markdown; the same text as its card's body
+}
+
+/** The kinds a yes can cover for the rest of a task, not only this once. */
+export const TASK_WIDE = ["run", "write", "fetch"];
 
 export type TaskStatus = "working" | "waiting" | "done" | "failed" | "stopped";
 
@@ -58,6 +88,8 @@ export interface Task {
   questions: string[]; // what it is waiting to hear, when status is "waiting"
   started_at: string;
   updated_at: string;
+  /** work: the folder it works in. */
+  folder?: string | null;
 }
 
 /** Still going: working, or waiting for an answer. */
@@ -89,6 +121,10 @@ export interface AppState {
   settings: Settings;
   /** What this Mac can do: hear the user, and speak. */
   voice: { hear: boolean; speak: boolean };
+  /** What waits for the user's yes, oldest first. A question is open exactly as long as it is listed here. */
+  approvals: Approval[];
+  /** Listening for "Hey Jarvis": `on` while the microphone is open for it, `awake` once it heard its name. */
+  ear: { on: boolean; awake: boolean };
 }
 
 export interface Source {
@@ -123,6 +159,8 @@ export interface TodayMeeting {
   end: string;
   engagement: string | null;
   people: string[];
+  /** The user said it is off: cancelled, skipped or moved. */
+  skipped?: boolean;
 }
 
 export interface Today {
@@ -195,6 +233,33 @@ export interface Activity {
   text: string;
 }
 
+/** A time the server sends as text (ISO) or as a number (seconds since 1970). */
+export type When = string | number | null;
+
+/** Something Jarvis will say at a given time. */
+export interface Reminder {
+  id: string | number;
+  due: When;
+  text: string;
+}
+
+/** Who owes what, and by when. `status` is "open" until it is done. */
+export interface PromiseEntry {
+  id: string | number;
+  engagement: string | null;
+  owner: string;
+  text: string;
+  due: When;
+  status: string;
+}
+
+/** What Jarvis knows about one engagement. Only the parts the dashboard shows are named here. */
+export interface Dossier {
+  name: string;
+  dossier?: string | null; // markdown
+  promises?: PromiseEntry[] | null;
+}
+
 export type ServerMessage =
   | ({ type: "state" } & Partial<AppState>)
   // a call being listened to
@@ -210,6 +275,7 @@ export type ServerMessage =
   | ({ type: "brief" } & Brief)
   // talking to Jarvis
   | { type: "voice"; phase: "listening" | "partial" | "heard" | "cancelled"; text?: string }
+  | { type: "ear"; phase: "asleep" | "awake" | "off" }
   | { type: "turn"; id: string; text: string; spoken: boolean; at: string }
   | { type: "step"; id: string; text: string }
   | { type: "reply_delta"; id: string; text: string }
@@ -235,6 +301,10 @@ export interface Api {
   answerTask(id: string, text: string): Promise<unknown>;
   stopTask(id: string): Promise<unknown>;
   dismissCard(id: string): Promise<unknown>;
+  /** The user's answer to an approval. `scope` "task": the yes holds for the rest of that task. */
+  settleApproval(id: string, approve: boolean, scope?: "task"): Promise<unknown>;
+  /** Tells the service that speech `id` started or stopped sounding. Nothing comes back, and a failure is nobody's business. */
+  voicePlaying(id: string, playing: boolean): void;
   saveSettings(change: Partial<Settings>): Promise<unknown>;
   reconnect(): Promise<unknown>;
   syncNow(): Promise<unknown>;
@@ -244,6 +314,30 @@ export interface Api {
   facts(): Promise<Fact[]>;
   forgetFact(id: string | number): Promise<unknown>;
   activity(limit: number): Promise<Activity[]>;
+  reminders(): Promise<Reminder[]>;
+  promises(): Promise<PromiseEntry[]>;
+  engagement(name: string): Promise<Dossier>;
+}
+
+/** A request the server answered with an error. `status` tells a missing endpoint from a broken one. */
+export class HttpError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/**
+ * For the parts of the service that may not be there yet: an endpoint the server does not have
+ * (404, or 405 when only the page's own files answer under that path) reads as null, "nothing to show".
+ */
+export function optional<T>(job: Promise<T>): Promise<T | null> {
+  return job.catch((error: unknown) => {
+    if (error instanceof HttpError && (error.status === 404 || error.status === 405)) return null;
+    throw error;
+  });
 }
 
 async function call<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
@@ -260,7 +354,7 @@ async function call<T>(method: "GET" | "POST" | "DELETE", path: string, body?: u
       (j) => j?.detail,
       () => undefined,
     );
-    throw new Error(typeof detail === "string" ? detail : `${method} ${path} failed (${res.status})`);
+    throw new HttpError(typeof detail === "string" ? detail : `${method} ${path} failed (${res.status})`, res.status);
   }
   return (await res.json()) as T;
 }
@@ -277,6 +371,10 @@ export const rest: Api = {
   answerTask: (id, text) => call("POST", `/api/tasks/${seg(id)}/answer`, { text }),
   stopTask: (id) => call("POST", `/api/tasks/${seg(id)}/stop`),
   dismissCard: (id) => call("POST", `/api/cards/${seg(id)}/dismiss`),
+  settleApproval: (id, approve, scope) => call("POST", `/api/approvals/${seg(id)}`, scope ? { approve, scope } : { approve }),
+  voicePlaying: (id, playing) => {
+    void call("POST", "/api/voice/playing", { id, playing }).catch(() => undefined);
+  },
   saveSettings: (change) => call("POST", "/api/settings", change),
   reconnect: () => call("POST", "/api/reconnect"),
   syncNow: () => call("POST", "/api/sync"),
@@ -286,6 +384,9 @@ export const rest: Api = {
   facts: () => call("GET", "/api/facts"),
   forgetFact: (id) => call("DELETE", `/api/facts/${seg(String(id))}`),
   activity: (limit) => call("GET", `/api/activity?limit=${limit}`),
+  reminders: () => call("GET", "/api/reminders"),
+  promises: () => call("GET", "/api/promises"),
+  engagement: (name) => call("GET", `/api/engagements/${seg(name)}`),
 };
 
 const RETRY_MIN_MS = 500;

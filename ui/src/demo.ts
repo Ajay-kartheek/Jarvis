@@ -1,10 +1,13 @@
 // Scripted stand-in for the server. It plays one story on a loop, using the real message types and
-// answering every REST call: a spoken request to prepare for a call, steps, a questions card, an
-// answer, a prep card, then a short call with SAY cards, and its notes. All names here are made up.
-// `scene` holds still on one moment instead (see the SCENES), for looking at a single state.
+// answering every REST call: Jarvis wakes to its name and answers a spoken question in full, prepares
+// for a call (steps, a questions card, an answer, a prep card), follows a short call with SAY cards
+// and writes its notes, sends a mail only after a yes, speaks up with a proposal, and then has
+// nothing to show, which inside the app makes the panel shrink to the small orb. All names here are
+// made up, and the demo makes no sound. `scene` holds still on one moment instead (see the SCENES),
+// for looking at a single state.
 
 import * as voice from "./audio";
-import type { Api, AppState, Card, ServerMessage, Source, Speaker, Task } from "./api";
+import type { Api, AppState, Approval, Card, ServerMessage, Source, Speaker, Task } from "./api";
 import {
   COUNTS,
   DRAFT,
@@ -14,12 +17,16 @@ import {
   at,
   daysAgo,
   demoActivity,
+  demoDossier,
   demoFacts,
   demoLibrary,
+  demoPromises,
+  demoReminders,
   demoSources,
   demoToday,
   minutes,
 } from "./demoData";
+import { MINI_AFTER_MS } from "./mini";
 
 type Beat =
   | { say: Speaker; text: string }
@@ -58,17 +65,70 @@ const CALL: Beat[] = [
 
 const MANUAL_REPLY = "Offer to send a written summary after the call.\nAlso: Priya asked for one last week.";
 
+const ASK_DAY = "What is on my plate today?";
+const DAY =
+  "Three things. The Atlas weekly sync is at ten: have the sign-off status and the rehearsal date ready. " +
+  "The Borealis support review follows at half past eleven, and Meera expects the weekend cover costs. " +
+  "Ravi and Meera are both waiting for a reply from you, and I can draft them if you like.";
 const REQUEST = "Prepare me for the Atlas weekly sync.";
 const ACK = "On it. I will put the Atlas sheet together, and I have two questions first.";
 const QUESTIONS = ["Should the sheet cover the two open sign-off checks?", "Will anyone from Borealis join the rehearsal?"];
 const READY = "The Atlas prep is ready. Two checks are still open, and weekend cover is not agreed yet.";
 const TYPED_REPLY = "Atlas is on track for the fourteenth. Ravi still has two sign-off checks open.";
+const SEND = "Send Priya the summary.";
+const SEND_ACK = "The mail to Priya is on screen. It goes out when you say yes.";
+const NOTICED = "Ravi moved the Atlas cutover rehearsal to Thursday at 10:00.";
 const SIGNIN = { key: "signin", text: "Google sign-in has expired. Reconnect to keep syncing." };
+
+/** A reply that is long on purpose, with a list in it: the answer must show all of it at any size. */
+const LONG_REPLY = `Three things need you today, and one can wait.
+
+1. **Atlas weekly sync at 10:00.** Ravi still has two of the five sign-off checks open, so the fourteenth only holds if both close by Friday. Have the rehearsal date ready: Priya wants Wednesday, Ravi prefers Thursday.
+2. **Borealis support review at 11:30.** Meera expects the weekend cover costs. The four hour response time was agreed for weekdays only, so keep it out of the weekend terms.
+3. **Two replies are waiting.** Ravi asks whether the rehearsal can move to Wednesday, and Meera wants the support terms confirmed in writing by Friday.
+
+The Atlas cutover checklist still has no owner for the rollback step. That can wait until after the sync, but not past Friday.`;
+
+/** What needs a yes, as the service asks it: the mail whole as it would go out, the command exactly. */
+interface Ask extends Approval {
+  said: string;
+}
+const MAIL: Ask = {
+  id: "a1",
+  kind: "send_mail",
+  title: "Send: Atlas weekly sync, summary",
+  detail: `From: you@example.com\nTo: priya@example.com\nCc: ravi@example.com\nSubject: Atlas weekly sync, summary\n\n${DRAFT}`,
+  said: "Shall I send the mail to Priya about the Atlas weekly sync? It is on screen.",
+};
+const WORK_FOLDER = "/Users/you/Documents/Jarvis Work/Borealis support terms";
+const COMMAND: Ask = {
+  id: "a2",
+  kind: "run",
+  title: "Run a command",
+  detail:
+    "For the work: Tidy the Borealis support terms\n\n" +
+    '```\ngit commit -am "Support terms: weekday cover, four hour response on priority one"\n```\n' +
+    "in `~/Documents/Jarvis Work/Borealis support terms`\n\n" +
+    "It changes the repository, so it is shown to you first.\n\n" +
+    '"Allow for this task" covers every command that starts with `git commit` until this work ends.',
+  said: "The work on the Borealis support terms wants to run git commit. Shall I allow it?",
+};
 
 /** A card as the story writes it; the time is put on when it is shown. */
 type Draft = Omit<Card, "at">;
 const PREP_TITLE = "Prep: Atlas weekly sync";
-const CARDS: Record<"questions" | "prep" | "notes" | "draft" | "file", Draft> = {
+const CARDS: Record<"questions" | "prep" | "notes" | "draft" | "file" | "proposal" | "sent", Draft> = {
+  proposal: {
+    id: "x1",
+    kind: "proposal",
+    title: "",
+    body: NOTICED,
+    actions: [
+      { label: "Prepare for it", say: "Prepare me for the Atlas cutover rehearsal on Thursday." },
+      { label: "Remind me Thursday", say: "Remind me on Thursday at 9:30 about the Atlas cutover rehearsal." },
+    ],
+  },
+  sent: { id: "m1", kind: "note", title: "Sent: Atlas weekly sync, summary", body: `To priya@example.com. Sent.\n\n${DRAFT}` },
   questions: { id: "c1", kind: "questions", title: PREP_TITLE, body: "", task: "t1", questions: QUESTIONS },
   prep: {
     id: "p1",
@@ -96,7 +156,27 @@ const CARDS: Record<"questions" | "prep" | "notes" | "draft" | "file", Draft> = 
 };
 
 /** The moments `?scene=` can hold still on. */
-const SCENES = ["idle", "listening", "thinking", "speaking", "questions", "cards", "call", "overview"] as const;
+const SCENES = [
+  "idle",
+  "ready",
+  "awake",
+  "listening",
+  "thinking",
+  "speaking",
+  "answer",
+  "reply",
+  "questions",
+  "approval",
+  "command",
+  "proposal",
+  "cards",
+  "call",
+  "mini",
+  "overview",
+] as const;
+
+const YES = /^(yes|yeah|yep|ok|okay|sure|approve|go ahead|do it|send it)[.!]*$/i;
+const NO = /^(no|nope|cancel|stop|not now|leave it)[.!]*$/i;
 
 const sentences = (text: string) => text.match(/[^.!?]+[.!?]*\s*/g)?.map((s) => s.trim()) ?? [text];
 
@@ -114,8 +194,10 @@ const INITIAL = (): AppState => ({
   tasks: [],
   cards: [],
   conversation: [],
-  settings: { auto: true, speak: true, auto_prep: true },
+  settings: { auto: true, speak: true, auto_prep: true, wake_word: true, proactive: true },
   voice: { hear: true, speak: true },
+  approvals: [],
+  ear: { on: true, awake: false },
 });
 
 export function createDemo(send: (msg: ServerMessage) => void, scene: string | null): { api: Api; stop: () => void } {
@@ -134,6 +216,8 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
   let nextTurn = 1;
   let replies: Promise<void> = Promise.resolve(); // replies run one after another, never interleaved
   let answerer: ((text: string | null) => void) | null = null; // set while the story waits for an answer
+  let decider: ((approve: boolean) => void) | null = null; // set while the story waits for a yes or a no
+  let chooser: (() => void) | null = null; // set while the story waits for a press on its proposal
   const timers = new Set<number>();
 
   const update = (patch: Partial<AppState> = {}): AppState => {
@@ -206,6 +290,23 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
 
   // --- the user talks to Jarvis ----------------------------------------------------------------
 
+  /** The ear changes: the state says so from now on, and the event tells the page at once. */
+  const ear = (phase: "asleep" | "awake" | "off") => {
+    app = { ...app, ear: { on: phase !== "off", awake: phase === "awake" } };
+    emit({ type: "ear", phase });
+  };
+
+  /** "Hey Jarvis", or Jarvis still listening after its answer: the user says `text` without touching a key. */
+  async function wakes(text: string, signal: AbortSignal) {
+    ear("awake");
+    await pause(700, signal);
+    try {
+      await userSpeaks(text, signal);
+    } finally {
+      ear("asleep");
+    }
+  }
+
   /** The key is held and the user says `text`: the words appear as they are recognised. */
   async function userSpeaks(text: string, signal: AbortSignal) {
     emit({ type: "voice", phase: "listening" });
@@ -251,6 +352,46 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
     voice.simulate(sentences(text));
   }
 
+  // --- what waits for a yes --------------------------------------------------------------------
+
+  /** Shows the question with its card, as the service does: listed in the state for as long as it is open. */
+  function asks({ said: _said, ...approval }: Ask) {
+    app = { ...app, approvals: [...app.approvals.filter((old) => old.id !== approval.id), approval] };
+    putCard({ id: `card-${approval.id}`, kind: "approval", title: approval.title, body: approval.detail, approval: approval.id });
+    update();
+  }
+
+  /** The answer is in: the question leaves the state and its card goes. Returns whether it was open. */
+  function settles(id: string, approve: boolean): boolean {
+    const approval = app.approvals.find((open) => open.id === id);
+    if (!approval) return false;
+    app = { ...app, approvals: app.approvals.filter((open) => open.id !== id) };
+    dropCard(`card-${id}`);
+    update();
+    log("approval", `${approve ? "Approved" : "Declined"}: ${approval.title}`);
+    decider?.(approve);
+    return true;
+  }
+
+  /** A plain yes or no to the one open question is its answer, and never reaches a model. */
+  function plainAnswer(text: string): boolean | null {
+    const said = text.trim();
+    if (app.approvals.length !== 1) return null;
+    return YES.test(said) ? true : NO.test(said) ? false : null;
+  }
+
+  /** The turn for a plain yes or no, as the service plays it: the question is settled, and it says so. */
+  function answered(id: string, text: string, spoken: boolean, approve: boolean): string {
+    const said = approve ? "Going ahead." : "Cancelled.";
+    emit({ type: "turn", id, text, spoken, at: at() });
+    note("user", text);
+    settles(app.approvals[0].id, approve);
+    note("jarvis", said);
+    emit({ type: "reply", id, text: said, speak: false, seconds: 0, at: at() });
+    update();
+    return said;
+  }
+
   // --- a call ----------------------------------------------------------------------------------
 
   async function speak(speaker: Speaker, text: string, signal: AbortSignal) {
@@ -294,6 +435,7 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
     endCall();
     const run = new AbortController();
     call = run;
+    if (app.ear.on) ear("off"); // Jarvis's own ear is closed for as long as a call is listened to
     const follow = () => run.abort(outer.reason);
     outer.addEventListener("abort", follow, { once: true });
     meter = every(100, () => {
@@ -332,6 +474,7 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
     call = null;
     clear(meter);
     talking = null;
+    if (app.settings.wake_word && !app.ear.on) ear("asleep"); // and opens again when the call is over
     return app.meeting ? update({ status: "idle", meeting: null }) : app;
   }
 
@@ -341,10 +484,18 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
     for (;;) {
       app = INITIAL();
       update();
-      await pause(1800, signal);
+      await pause(2600, signal); // the ear is open: the orb waits for its name
 
-      // A spoken request, and the work it starts.
-      await userSpeaks(REQUEST, signal);
+      // "Hey Jarvis", a spoken question, and the answer: said aloud, and shown in full for as long as it is the latest.
+      await wakes(ASK_DAY, signal);
+      await exchange(
+        { text: ASK_DAY, spoken: true, steps: ["read: today's calendar", "search: mail waiting for a reply"], reply: DAY },
+        signal,
+      );
+      await pause(sentences(DAY).length * 2600 + 600, signal);
+
+      // Jarvis still listens for a moment after it has answered: the next request needs no name. It starts work.
+      await wakes(REQUEST, signal);
       await exchange(
         { text: REQUEST, spoken: true, steps: ["search: Atlas weekly sync", "read: Migration plan v3"], reply: ACK },
         signal,
@@ -389,13 +540,59 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
       putCard(CARDS.draft);
       log("notes", "Wrote the notes for the Atlas weekly sync");
       speaksUp("Your notes for the Atlas weekly sync are saved, and I drafted a summary for Priya.");
-      await pause(12_000, signal);
+      await pause(9000, signal);
 
-      // A notice, then everything is put away and the story starts again.
+      // Nothing is sent without a yes: the whole mail is put on screen, and the story says "yes"
+      // unless somebody presses a button first.
+      await wakes(SEND, signal);
+      await exchange({ text: SEND, spoken: true, steps: ["read: Draft: summary for Priya"], reply: SEND_ACK }, signal);
+      await pause(1800, signal);
+      asks(MAIL);
+      speaksUp(MAIL.said);
+      const pressed = await new Promise<boolean | null>((resolve, reject) => {
+        const timer = setTimeout(() => resolve(null), 9000);
+        decider = (approve) => {
+          clearTimeout(timer);
+          resolve(approve);
+        };
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+      decider = null;
+      let approved = pressed;
+      if (approved === null && app.approvals.length === 1) {
+        await wakes("Yes", signal);
+        answered(`d${nextTurn++}`, "Yes", true, true);
+        approved = true;
+      }
+      if (approved) {
+        await pause(1500, signal);
+        dropCard("d1"); // the draft has gone out: what is left of it is the mail that was sent
+        putCard(CARDS.sent);
+        log("mail", "Sent: Atlas weekly sync, summary (to priya@example.com)");
+        speaksUp("Sent to Priya.");
+      }
+      await pause(7000, signal);
+
+      // Jarvis speaks up by itself: something it noticed in new mail, and what could be done about it.
+      putCard(CARDS.proposal);
+      speaksUp(NOTICED);
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 12_000);
+        chooser = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+      chooser = null;
+      dropCard("x1");
+
+      // A notice, and then nothing at all to show: after 25 seconds of that the page asks the app for
+      // the small orb. The story starts again with a wake, which opens the panel.
       update({ notices: [SIGNIN] });
       await pause(7000, signal);
       update({ notices: [] });
-      await pause(2500, signal);
+      await pause(MINI_AFTER_MS + 14_000, signal);
     }
   }
 
@@ -406,8 +603,70 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
       note("user", REQUEST);
       note("jarvis", ACK);
     };
+    const work = (step: string): Task => ({
+      id: "t3",
+      kind: "work",
+      title: "Work: Tidy the Borealis support terms",
+      engagement: "Borealis",
+      status: "working",
+      step,
+      questions: [],
+      started_at: at(-minutes(3)),
+      updated_at: at(),
+      folder: WORK_FOLDER,
+    });
     switch (name) {
+      case "ready":
+        update(); // the ear is open, and nothing has been said yet
+        break;
+      case "awake":
+        ear("awake"); // it has heard its name and has been told nothing yet: it listens like a held key
+        update();
+        break;
+      case "mini":
+        // The app says the panel is small with this class. In a browser the scene says it itself.
+        document.documentElement.classList.add("jarvis-mini");
+        update();
+        break;
+      case "answer":
+        // An ordinary answer, a few sentences: it must be there whole, with no scrolling, at every size.
+        note("user", ASK_DAY);
+        note("jarvis", DAY);
+        update();
+        break;
+      case "reply":
+        note("user", REQUEST);
+        note("jarvis", ACK);
+        note("user", ASK_DAY);
+        note("jarvis", LONG_REPLY);
+        update();
+        break;
+      case "approval":
+        talked();
+        note("user", SEND);
+        note("jarvis", SEND_ACK);
+        putCard(CARDS.draft);
+        asks(MAIL);
+        note("jarvis", MAIL.said);
+        update();
+        break;
+      case "command":
+        note("user", "Tidy the Borealis support terms and commit them.");
+        note("jarvis", "I have started. I will ask before anything that changes the repository.");
+        putTask(work("Waiting for your OK: Run a command"));
+        asks(COMMAND);
+        note("jarvis", COMMAND.said);
+        update();
+        break;
+      case "proposal":
+        talked();
+        putTask(work("edit: support-terms.md"));
+        putCard(CARDS.proposal);
+        note("jarvis", NOTICED);
+        update();
+        break;
       case "listening":
+        update();
         emit({ type: "voice", phase: "listening" });
         emit({ type: "voice", phase: "partial", text: "Prepare me for the Atlas weekly" });
         every(100, () => emit({ type: "level", source: "voice", level: 0.03 + 0.55 * Math.random() ** 2 }));
@@ -419,6 +678,7 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
         update({ busy: true });
         break;
       case "speaking":
+        update();
         talked();
         emit({ type: "turn", id: "h1", text: REQUEST, spoken: true, at: at() });
         emit({ type: "reply", id: "h1", text: ACK, speak: true, seconds: 1.8, at: at() });
@@ -451,7 +711,8 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
         break;
       case "call": {
         const started = at(-minutes(12) - 40_000);
-        update({ status: "listening", meeting: { title: "Atlas weekly sync", engagement: "Atlas", started_at: started } });
+        const closed = { on: false, awake: false }; // no ear during a call
+        update({ status: "listening", meeting: { title: "Atlas weekly sync", engagement: "Atlas", started_at: started }, ear: closed });
         emit({ type: "sentence", speaker: "Them", text: "So where are we on the Atlas migration?", at: at(-minutes(1)) });
         emit({ type: "sentence", speaker: "You", text: "We are aiming for the fourteenth.", at: at(-50_000) });
         emit({ type: "thinking", id: 90, question: "Are we still on track for the fourteenth?" });
@@ -484,7 +745,8 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
         update({ notices: [SIGNIN] });
         break;
       default:
-        update(); // idle
+        // idle: this Mac has no ear for "Hey Jarvis"; the key is the way to talk
+        update({ ear: { on: false, awake: false }, settings: { ...app.settings, wake_word: false } });
     }
   }
 
@@ -502,17 +764,33 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
       return { ok: true };
     },
     talk: async (text, id) => {
+      // A typed yes or no settles the one open question.
+      const plain = plainAnswer(text);
+      if (plain !== null) return { id, text: answered(id, text, false, plain), speak: false, seconds: 0 };
       // The page showed the message at once. Jarvis looks something up, then answers in text.
+      const reply = /^prepare/i.test(text)
+        ? "On it. I will put the sheet for the rehearsal together."
+        : /^remind/i.test(text)
+          ? "I will remind you on Thursday at half past nine."
+          : /plate|today/i.test(text)
+            ? LONG_REPLY
+            : TYPED_REPLY;
+      const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
       note("user", text);
       update({ busy: true });
       emit({ type: "step", id, text: "search: Atlas status" });
-      await new Promise((resolve) => setTimeout(resolve, 900));
+      await wait(900);
       emit({ type: "step", id, text: "read: Migration plan v3" });
-      await new Promise((resolve) => setTimeout(resolve, 800));
-      note("jarvis", TYPED_REPLY);
-      emit({ type: "reply", id, text: TYPED_REPLY, speak: false, seconds: 1.8, at: at() });
+      await wait(800);
+      const words = reply.match(/\S+\s*/g) ?? [];
+      for (let n = 3; n < words.length; n += 3) {
+        emit({ type: "reply_delta", id, text: words.slice(0, n).join("").trimEnd() });
+        await wait(60);
+      }
+      note("jarvis", reply);
+      emit({ type: "reply", id, text: reply, speak: false, seconds: 1.8, at: at() });
       update({ busy: false });
-      return { id, text: TYPED_REPLY, speak: false, seconds: 1.8 };
+      return { id, text: reply, speak: false, seconds: 1.8 };
     },
     resetTalk: async () => {
       update({ conversation: [] });
@@ -533,11 +811,19 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
     },
     dismissCard: async (id) => {
       dropCard(id);
+      if (id === "x1") chooser?.();
       return { ok: true };
     },
+    settleApproval: async (id, approve) => {
+      if (!settles(id, approve)) throw new Error("That question is no longer open.");
+      return { ok: true };
+    },
+    voicePlaying: () => undefined, // the demo's voice is acted out, without sound
     saveSettings: async (change) => {
       const settings = { ...app.settings, ...change };
-      update({ settings, auto: settings.auto });
+      // The ear follows its switch, except during a call, when it is closed anyway.
+      const on = settings.wake_word === true && app.meeting === null;
+      update({ settings, auto: settings.auto, ear: { on, awake: on && app.ear.awake } });
       return settings;
     },
     reconnect: async () => {
@@ -570,6 +856,9 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
       return { ok: true };
     },
     activity: async (limit) => activity.slice(0, limit),
+    reminders: async () => demoReminders(),
+    promises: async () => demoPromises(),
+    engagement: async (name) => demoDossier(name),
   };
 
   if (scene && (SCENES as readonly string[]).includes(scene)) hold(scene);
@@ -582,6 +871,7 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
       call?.abort();
       timers.forEach((id) => clearInterval(id));
       timers.clear();
+      if (scene === "mini") document.documentElement.classList.remove("jarvis-mini");
     },
   };
 }

@@ -49,10 +49,12 @@ export interface Turn {
   doneAt: number | null;
 }
 
-/** The user's words while the key is held. */
+/** The user's words while the key is held, or after "Hey Jarvis". */
 export interface Hearing {
   phase: "off" | "listening" | "heard";
   text: string;
+  /** Set by the wake alone, until the first `voice` message confirms that words are being taken. */
+  woke?: boolean;
 }
 
 export interface Model {
@@ -99,6 +101,8 @@ const BLANK: Model = {
     conversation: [],
     settings: { auto: true, speak: true, auto_prep: true },
     voice: { hear: false, speak: false },
+    approvals: [],
+    ear: { on: false, awake: false },
   },
   partial: { Them: "", You: "" },
   current: null,
@@ -238,6 +242,13 @@ function reduce(m: Model, action: Action): Model {
     case "voice":
       if (msg.phase === "cancelled") return { ...m, hearing: BLANK.hearing };
       return { ...m, hearing: { phase: msg.phase === "heard" ? "heard" : "listening", text: msg.text ?? "" } };
+    case "ear": {
+      const app = { ...m.app, ear: { on: msg.phase !== "off", awake: msg.phase === "awake" } };
+      // Awake is a held key: Jarvis listens from this moment, before the first `voice` message says so.
+      if (msg.phase === "awake") return { ...m, app, hearing: { phase: "listening", text: "", woke: true } };
+      // Asleep again with no `voice` message in between: nothing was said, and nothing else will end the listening.
+      return { ...m, app, hearing: m.hearing.woke ? BLANK.hearing : m.hearing };
+    }
     case "turn": {
       const turn = { ...turnFor(m, msg.id, now), text: msg.text, spoken: msg.spoken };
       return said({ ...m, hearing: BLANK.hearing, turn }, "user", msg.text, msg.at);
@@ -301,6 +312,10 @@ export function useJarvis(view: View) {
   const sound = view === "orb";
   const settings = useRef(model.app.settings);
   settings.current = model.app.settings;
+  const app = useRef(model.app);
+  app.current = model.app;
+  const server = useRef(api);
+  server.current = api;
 
   useEffect(() => {
     const receive = (msg: ServerMessage) => {
@@ -313,14 +328,26 @@ export function useJarvis(view: View) {
         return;
       }
       // The user is speaking, or a new exchange began: whatever was being said is cut short.
-      if (sound && (msg.type === "turn" || (msg.type === "voice" && msg.phase === "listening"))) voice.stop();
+      const woke = msg.type === "ear" && msg.phase === "awake";
+      if (sound && (woke || msg.type === "turn" || (msg.type === "voice" && msg.phase === "listening"))) voice.stop();
+      // A tone says that Jarvis heard its name. Never into a call, and the demo makes no sound at all.
+      const { status, meeting, call } = app.current;
+      if (sound && woke && !acting && status === "idle" && !meeting && !call.active) voice.chime();
       dispatch({ msg, now: Date.now() });
     };
 
     const disarm = sound ? voice.arm() : undefined;
+    if (sound) voice.onPlaying((id, playing) => server.current.voicePlaying(id, playing));
+    const hush = () => {
+      disarm?.();
+      voice.stop(); // while the service can still be told that the sound ended
+      if (sound) voice.onPlaying(null);
+    };
     let demo: ReturnType<typeof createDemo> | null = null;
+    let acting = false; // the demo is playing: set before its first message, which comes while it is being made
     const playDemo = () => {
       dispatch({ reset: true });
+      acting = true;
       demo = createDemo(receive, SCENE);
       setApi(demo.api);
       setLink("demo");
@@ -329,8 +356,7 @@ export function useJarvis(view: View) {
       playDemo();
       return () => {
         demo?.stop();
-        disarm?.();
-        voice.stop();
+        hush();
       };
     }
 
@@ -348,6 +374,7 @@ export function useJarvis(view: View) {
       if (demo) {
         demo.stop();
         demo = null;
+        acting = false;
         dispatch({ reset: true });
       }
       wasLive = true;
@@ -362,8 +389,7 @@ export function useJarvis(view: View) {
       clearTimeout(fallback);
       close();
       demo?.stop();
-      disarm?.();
-      voice.stop();
+      hush();
     };
   }, [sound]);
 
@@ -434,6 +460,21 @@ export function useJarvis(view: View) {
     [run],
   );
 
+  /** The user's yes or no to an approval. The card goes when the server says the question is closed. */
+  const settle = useCallback(
+    (approval: string, approve: boolean, scope?: "task") => run((a) => a.settleApproval(approval, approve, scope)),
+    [run],
+  );
+
+  /** One press on a proposal: its words go to Jarvis as if typed, and the card has done its job. */
+  const choose = useCallback(
+    (card: string, say: string) => {
+      void dismiss(card);
+      return talk(say);
+    },
+    [dismiss, talk],
+  );
+
   /** The switch moves at once; if the server refuses, it moves back. */
   const saveSettings = useCallback(
     async (change: Partial<Settings>) => {
@@ -466,6 +507,8 @@ export function useJarvis(view: View) {
     answer,
     stopTask,
     dismiss,
+    settle,
+    choose,
     saveSettings,
   };
 }

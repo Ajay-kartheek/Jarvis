@@ -12,6 +12,17 @@ const pad = (n: number) => String(n).padStart(2, "0");
 export const parseTime = (value: Text): number =>
   value ? Date.parse(value.replace(" ", "T").replace(/(\.\d{3})\d+/, "$1")) : NaN;
 
+/**
+ * Milliseconds for a time the server may send either way: as text (ISO), or as a number of seconds
+ * since 1970 (a number too large for that is taken as milliseconds). NaN if it is neither.
+ */
+export function timeOf(value: string | number | null | undefined): number {
+  if (value === null || value === undefined || value === "") return NaN;
+  const number = typeof value === "number" ? value : /^\d+(\.\d+)?$/.test(value) ? Number(value) : NaN;
+  if (!Number.isNaN(number)) return number < 1e11 ? number * 1000 : number;
+  return parseTime(String(value));
+}
+
 /** Wall-clock time as HH:MM:SS. */
 export function clock(ms: number): string {
   const d = new Date(ms);
@@ -74,6 +85,29 @@ export function ago(value: Text, now = Date.now()): string {
   return shortDate(value);
 }
 
+/**
+ * When something is due, for a list: "today 16:30", "tomorrow 09:00", "Fri 20 Nov, 09:00". A due
+ * date without a time of day ("2026-11-20") is only the day, and so is every date when `dayOnly` is
+ * set (a promise is due by a day, not by an hour). What cannot be read as a time is shown as it came.
+ */
+export function dueLabel(value: string | number | null | undefined, now = Date.now(), dayOnly = false): string {
+  if (value === null || value === undefined || value === "") return "";
+  const dateOnly = typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+  const time = dateOnly ? new Date(`${value}T12:00:00`).getTime() : timeOf(value);
+  if (Number.isNaN(time)) return String(value);
+  const days = Math.round((startOfDay(time) - startOfDay(now)) / 86_400_000);
+  const day =
+    days === 0
+      ? "today"
+      : days === 1
+        ? "tomorrow"
+        : days === -1
+          ? "yesterday"
+          : new Date(time).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  if (dateOnly || dayOnly) return day;
+  return `${day}${Math.abs(days) > 1 ? "," : ""} ${clock(time).slice(0, 5)}`;
+}
+
 function startOfDay(ms: number): number {
   const d = new Date(ms);
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
@@ -94,6 +128,9 @@ export function dayKey(value: Text): string {
   const time = parseTime(value);
   return Number.isNaN(time) ? "?" : String(startOfDay(time));
 }
+
+/** A full path as people write it: the home folder is "~". */
+export const tilde = (path: string): string => path.replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
 
 /** A path on this Mac as a link the app can open. Only a full path makes one. */
 export const fileUrl = (path: string): string | null =>

@@ -39,6 +39,7 @@ html[data-view="dashboard"] .toast { bottom: 24px; }
 .mini-orb .orb-halo { inset: -10%; scale: 1; }
 .mini-orb[data-state="thinking"] .orb-halo { animation: breathe 0.9s ease-in-out infinite; }
 .mini-orb[data-state="idle"] .orb-halo { opacity: 0.45; }
+.mini-orb[data-state="ready"] .orb-halo { animation: attend 4.2s ease-in-out infinite; }
 .mini-orb .orb-hud { position: absolute; inset: 0; }
 .rail nav { display: grid; gap: 2px; }
 .rail-item {
@@ -115,6 +116,26 @@ html[data-view="dashboard"] .toast { bottom: 24px; }
 .task-item[data-status="waiting"] .task-state, .task-item[data-status="failed"] .task-state { color: var(--amber); }
 .task-item .took { text-align: right; }
 
+.task-item .task-main .path { margin-top: 1px; font-size: 11px; }
+
+/* Reminders and promises: side by side while there is room for both. */
+.cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.cols[data-one] { grid-template-columns: minmax(0, 1fr); }
+.ahead, .owed { display: grid; }
+.ahead li, .owed li { display: grid; align-items: baseline; gap: 12px; padding: 8px 0; border-top: 1px solid var(--cyan-faint); font-size: 15.5px; line-height: 1.35; }
+.ahead li:first-child, .owed li:first-child { border-top: 0; padding-top: 0; }
+.ahead li { grid-template-columns: 160px minmax(0, 1fr); }
+.ahead time { color: var(--cyan); font: 500 12px var(--mono); white-space: nowrap; }
+.ahead li[data-due] time { color: var(--amber); }
+.owed li { grid-template-columns: 58px minmax(0, 1fr) auto auto; }
+.owed b { overflow: hidden; color: var(--cyan); font: 500 11px var(--mono); letter-spacing: 0.06em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.owed time { color: var(--dim); font: 400 11px var(--mono); text-align: right; white-space: nowrap; }
+.owed time[data-late] { color: var(--amber); }
+.owed li[data-done] { color: var(--dim); }
+.owed li[data-done] > span:not(.chip) { text-decoration: line-through; text-decoration-color: var(--cyan-low); }
+.owed li[data-done] b { color: var(--dim); }
+.ahead li > span, .owed li > span:not(.chip) { overflow-wrap: anywhere; }
+
 .table { width: 100%; border-collapse: collapse; font-size: 15px; }
 .table th { padding: 4px 10px 8px 0; border-bottom: 1px solid var(--cyan-low); color: var(--cyan-mid); font: 500 10px var(--mono); letter-spacing: 0.16em; text-align: left; text-transform: uppercase; }
 .table td { padding: 9px 10px 9px 0; border-bottom: 1px solid var(--cyan-faint); vertical-align: baseline; }
@@ -141,6 +162,10 @@ html[data-view="dashboard"] .toast { bottom: 24px; }
 .meeting .quiet { margin-top: 2px; font-size: 15px; }
 .flag { margin-left: 8px; padding: 0 6px; border: 1px solid var(--amber); color: var(--amber); font: 500 10px/15px var(--mono); letter-spacing: 0.16em; text-transform: uppercase; vertical-align: 3px; }
 .meeting[data-now] .when { color: var(--amber); }
+/* Off: still in the calendar, but the user said it is not happening. */
+.meeting[data-off] .when, .meeting[data-off] strong { color: var(--dim); text-decoration: line-through; text-decoration-color: var(--cyan-mid); }
+.meeting[data-off] .chip, .meeting[data-off] .quiet { opacity: 0.55; }
+.flag.off { border-color: var(--cyan-low); color: var(--dim); }
 
 /* ---------- Library ---------- */
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--cyan-faint); }
@@ -188,6 +213,11 @@ html[data-view="dashboard"] .toast { bottom: 24px; }
 .stats { color: var(--dim); font: 400 11px var(--mono); }
 .people { display: flex; flex-wrap: wrap; gap: 6px; }
 .engagement .label { margin-top: 10px; }
+.dossier .read { max-width: none; font-size: 15px; line-height: 1.55; }
+.dossier .read > * { margin-bottom: 8px; }
+.dossier .read h3 { margin-top: 14px; }
+.dossier .read > :first-child { margin-top: 0; }
+.engagement .owed li { grid-template-columns: 58px minmax(0, 1fr) auto; }
 .facts { display: grid; }
 .fact { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: baseline; gap: 12px; padding: 8px 0; border-top: 1px solid var(--cyan-faint); font-size: 15.5px; line-height: 1.35; }
 .fact:first-child { border-top: 0; }
@@ -246,5 +276,5 @@ html[data-view="dashboard"] .toast { bottom: 24px; }
 
 /* One column that may be narrower than the longest word in it (see orb.css). */
 .page, .tasks, .timeline, .shelf-pane, .shelf, .reader, .reader header, .engagement .frame, .facts, .made, .days, .day,
-.facts-list, .task-item .task-main, .rail nav { grid-template-columns: minmax(0, 1fr); }
+.facts-list, .task-item .task-main, .rail nav, .ahead, .owed { grid-template-columns: minmax(0, 1fr); }
 .fact > span, .shelf-item strong, .meeting strong, .log li > span, .made-item > span, .read { overflow-wrap: anywhere; }

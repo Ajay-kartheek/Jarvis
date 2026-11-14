@@ -254,8 +254,11 @@ body::after {
 @keyframes blink { 50% { opacity: 0; } }
 @keyframes breathe { 50% { opacity: 0.35; } }
 
-/* Typewriter caret: after the text that is still coming in. */
-[data-typing]:is(.live-text, .entry-text, .say-text, .also)::after {
+/* Typewriter caret: after the text that is still coming in. In an answer, which is made of
+   paragraphs and lists, it follows the last of them. */
+[data-typing]:is(.live-text, .entry-text, .say-text, .also)::after,
+.said[data-typing] > :last-child:not(ul, ol)::after,
+.said[data-typing] > :is(ul, ol):last-child > li:last-child::after {
   content: "";
   display: inline-block;
   width: 0.45em;
@@ -277,6 +280,8 @@ body::after {
   transition: opacity 0.4s;
 }
 .orb[data-state="listening"] .orb-halo, .orb[data-state="speaking"] .orb-halo { opacity: 0.95; }
+.orb[data-state="ready"] .orb-halo { opacity: 0.8; animation: attend 4.2s ease-in-out infinite; } /* slow breath: the ear is open */
+@keyframes attend { 50% { opacity: 0.5; } }
 
 .orb-hud { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
 .hud-track { fill: none; stroke: var(--cyan-low); stroke-width: 0.5; }
@@ -298,6 +303,7 @@ body::after {
 @keyframes brand { from { opacity: 0; letter-spacing: 0.9em; } }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
 .path { overflow: hidden; color: var(--dim); font: 400 12px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.path.tail { direction: rtl; text-align: left; } /* cut at its start, not at its end; the <bdi> inside keeps the path itself left to right */
 
 /* ---------- Things that need attention ---------- */
 .notices { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; overflow: hidden; }
@@ -351,6 +357,11 @@ body::after {
 .md pre code { padding: 0; background: none; }
 .md blockquote { padding-left: 12px; border-left: 2px solid var(--cyan-low); color: var(--text); }
 .md hr { border: 0; border-top: 1px solid var(--cyan-low); }
+
+/* A long text that shows its first lines and opens to the rest. */
+.fold { position: relative; overflow: hidden; }
+.fold[data-tall]:not([data-open]) { mask-image: linear-gradient(#000 calc(100% - 34px), transparent); } /* the last visible line fades out: there is more below */
+.more { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; padding-left: 0; }
 
 /* ---------- Reduced motion: no loops, no slides; state still shows through colour and text ---------- */
 @media (prefers-reduced-motion: reduce) {

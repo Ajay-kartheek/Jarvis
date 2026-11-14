@@ -1,5 +1,5 @@
 // Overview: whether Jarvis is working, how recently it read your accounts, how much it holds, what
-// needs attention, and what it is doing now.
+// needs attention, what it is doing now, and what lies ahead (reminders and promises).
 
 import { useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
@@ -7,9 +7,10 @@ import { type Counts, type SourceStatus, type Task, isRunning } from "../../api"
 import { MiniOrb } from "../../components/MiniOrb";
 import { Notices } from "../../components/Notices";
 import { orbStateOf } from "../../components/orbState";
-import { ago, elapsed, parseTime } from "../../format";
+import { ago, elapsed, parseTime, tilde } from "../../format";
 import { useNow } from "../../hooks";
 import type { Jarvis } from "../../store";
+import { Promises, Reminders } from "./Ahead";
 import type { DashboardData } from "./data";
 import { Count, Empty, PageHead, Panel } from "./parts";
 
@@ -43,6 +44,9 @@ export function Overview({ jarvis, data }: Props) {
   const tasks = [...app.tasks].sort((a, b) => Number(isRunning(b)) - Number(isRunning(a)));
   const counts = data.overview?.counts;
   const started = app.meeting ? parseTime(app.meeting.started_at) : NaN;
+  // Each is there only if the service has it: an older one has neither, and then there is no gap either.
+  const reminders = Array.isArray(data.reminders) ? data.reminders : null;
+  const promises = Array.isArray(data.promises) ? data.promises : null;
 
   return (
     <>
@@ -67,6 +71,7 @@ export function Overview({ jarvis, data }: Props) {
               {app.busy && app.status === "idle" ? "Working" : (STATUS_WORD[app.status] ?? app.status)}
             </motion.p>
             <p className="sub">
+              {app.ear.on && !app.meeting && "Listening for “Hey Jarvis” · "}
               {app.syncing ? "Syncing now" : `Last sync ${ago(app.last_sync, now)}`}
               {app.meeting && ` · ${app.meeting.title}${Number.isNaN(started) ? "" : `, ${elapsed(now - started)}`}`}
             </p>
@@ -100,7 +105,14 @@ export function Overview({ jarvis, data }: Props) {
         )}
       </Panel>
 
-      <Panel i={3} title="Sources" aside={data.overview ? `${data.overview.sources.length} connected` : undefined}>
+      {(reminders || promises) && (
+        <div className="cols" data-one={!(reminders && promises) || undefined}>
+          {reminders && <Reminders reminders={reminders} now={now} i={3} />}
+          {promises && <Promises promises={promises} now={now} i={4} />}
+        </div>
+      )}
+
+      <Panel i={5} title="Sources" aside={data.overview ? `${data.overview.sources.length} connected` : undefined}>
         <Sources sources={data.overview?.sources} loaded={data.overview !== null} now={now} />
       </Panel>
     </>
@@ -188,6 +200,11 @@ function TaskItem({ task, now, onStop }: { task: Task; now: number; onStop: (id:
         <span className="quiet">
           {task.status === "waiting" ? task.questions[0] ?? "Waiting for your answer" : task.step || "–"}
         </span>
+        {task.folder && (
+          <span className="path" title={task.folder}>
+            {tilde(task.folder)}
+          </span>
+        )}
       </div>
       {task.engagement && <span className="chip">{task.engagement}</span>}
       <span className="task-state">{TASK_WORD[task.status]}</span>
