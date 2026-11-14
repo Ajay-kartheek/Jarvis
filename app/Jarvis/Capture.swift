@@ -506,6 +506,8 @@ final class MicCapture {
   private var resampler: Resampler?
   private var observer: NSObjectProtocol?
   private var running = false
+  private var counted = false  // counted among the microphones recorded straight from the device
+  private var attempts = 1
   private var tapFormat: AVAudioFormat?
   // What the converter above was made for.
   private var resamplerFormat: AVAudioFormat?
@@ -535,16 +537,36 @@ final class MicCapture {
       onStatus: { event, fields in link.status(event, fields) })
   }
 
+  /// How often starting is tried: voice processing in the app leaves the device's format settling for
+  /// a moment after it stops, as when a call begins right after Jarvis has spoken.
+  static let startAttempts = 5
+
   /// Can be called again after `stop`: the app opens the microphone once per
   /// spoken message.
   func start() throws {
     running = true
-    do {
-      try install()
-      try begin()
-    } catch {
+    var failure: Error?
+    for attempt in 1...MicCapture.startAttempts {
+      attempts = attempt
+      do {
+        try install()
+        try begin()
+        failure = nil
+        break
+      } catch {
+        failure = error
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        if attempt < MicCapture.startAttempts { usleep(200_000) }
+      }
+    }
+    if let failure {
       running = false
-      throw error
+      throw failure
+    }
+    if !counted {
+      counted = true
+      DirectMicrophones.opened()
     }
     // The engine stops itself when the input device changes (AirPods connect,
     // a headset is unplugged), so set it up again.
@@ -618,6 +640,7 @@ final class MicCapture {
       [
         "sample_rate": tapFormat?.sampleRate ?? 0,
         "channels": Int(tapFormat?.channelCount ?? 0),
+        "attempts": attempts,
       ])
   }
 
@@ -627,6 +650,37 @@ final class MicCapture {
     observer = nil
     engine.inputNode.removeTap(onBus: 0)
     engine.stop()
+    if counted {
+      counted = false
+      DirectMicrophones.closed()
+    }
+  }
+}
+
+// MARK: - Microphones recorded straight from the device
+
+/// Counts the microphones this process records straight from the device (DeviceCapture, MicCapture).
+/// Voice processing changes the device's format under them, so it is never started while one runs.
+enum DirectMicrophones {
+  private static let lock = NSLock()
+  private static var count = 0
+
+  static var open: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return count
+  }
+
+  static func opened() {
+    lock.lock()
+    count += 1
+    lock.unlock()
+  }
+
+  static func closed() {
+    lock.lock()
+    count = max(0, count - 1)
+    lock.unlock()
   }
 }
 
@@ -658,16 +712,33 @@ final class DeviceCapture {
     self.onAudio = onAudio
   }
 
+  /// Voice processing (Speaker.swift) leaves the device in a format this cannot read for a moment
+  /// after it stops: this long at most is waited for the ordinary one to come back.
+  static let settleSeconds = 1.0
+
   func start() throws {
     guard device != AudioDeviceID(kAudioObjectUnknown) else {
       throw EarsError("The chosen input device is not there")
     }
-    guard var description = InputDevice.streamFormat(of: device),
-      let format = AVAudioFormat(streamDescription: &description),
-      format.sampleRate > 0, format.channelCount > 0,
-      format.isInterleaved || format.channelCount == 1,
-      let resampler = Resampler(from: format)
-    else { throw EarsError("Unsupported microphone format") }
+    func readable() -> (AVAudioFormat, Resampler)? {
+      guard var description = InputDevice.streamFormat(of: device),
+        let format = AVAudioFormat(streamDescription: &description),
+        format.sampleRate > 0, format.channelCount > 0,
+        format.isInterleaved || format.channelCount == 1,
+        let resampler = Resampler(from: format)
+      else { return nil }
+      return (format, resampler)
+    }
+    var found = readable()
+    let began = Date()
+    while found == nil && Date().timeIntervalSince(began) < DeviceCapture.settleSeconds {
+      usleep(50_000)
+      found = readable()
+    }
+    guard let (format, resampler) = found else { throw EarsError("Unsupported microphone format") }
+    if Date().timeIntervalSince(began) > 0.01 {
+      Log.write("microphone: its format settled after \(Int(Date().timeIntervalSince(began) * 1000)) ms")
+    }
     self.format = format
     self.resampler = resampler
     rate = format.sampleRate
@@ -684,6 +755,7 @@ final class DeviceCapture {
       procID = nil
       throw EarsError("Starting the microphone failed (OSStatus \(status))")
     }
+    DirectMicrophones.opened()
   }
 
   func stop() {
@@ -691,6 +763,7 @@ final class DeviceCapture {
     AudioDeviceStop(device, procID)
     AudioDeviceDestroyIOProcID(device, procID)
     self.procID = nil
+    DirectMicrophones.closed()
   }
 
   private func process(_ inputData: UnsafePointer<AudioBufferList>) {

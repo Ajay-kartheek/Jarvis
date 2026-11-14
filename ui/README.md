@@ -60,6 +60,12 @@ work task), `proposal`, `cards`, `call`, `mini` (the small orb; open it in a 150
   `voice_start`, `voice_stop`, and `{action: "size", mode: "mini" | "full"}`. In a plain browser there
   is no handler: the close button and the microphone button are not shown, the dashboard button opens
   `/?view=dashboard` in a new tab, and nothing shrinks (`?demo=1` alone answers the size requests itself).
+- Jarvis's voice is played by the app, not the page: `{action: "speech", id, seq, text, url}` for each
+  sentence and `{action: "speech_stop"}`. The app answers through `window.jarvisVoice(event)`:
+  `{type: "playing", id, seq, text}`, `{type: "level", level}` (about 25 a second), `{type: "quiet", id}`
+  and `{type: "stopped", id}` (it stopped by itself: the user talked over him, or the page went away).
+  The app also tells the service when the voice starts and stops sounding. In a plain browser the page
+  plays it with WebAudio, as before.
 - `window.jarvisNative.onShow(reason)`: `hotkey` and `menu` open the whole panel and focus the text box,
   `voice` must not take focus.
 - `<html>` has the class `jarvis-native` and the variable `--jarvis-titlebar` inside the app. The strip

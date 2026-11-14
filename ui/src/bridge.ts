@@ -12,7 +12,18 @@ declare global {
   }
 }
 
-export type NativeAction = "hide" | "show" | "quit" | "dashboard" | "voice_start" | "voice_stop" | "size";
+export type NativeAction =
+  | "hide"
+  | "show"
+  | "quit"
+  | "dashboard"
+  | "voice_start"
+  | "voice_stop"
+  | "size"
+  | "speech"
+  | "speech_stop"
+  | "speech_soon"
+  | "speech_keep";
 /** The panel's two forms: the whole panel, or a small square that shows only the orb. */
 export type PanelSize = "mini" | "full";
 export type View = "orb" | "dashboard";

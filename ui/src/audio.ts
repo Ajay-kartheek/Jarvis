@@ -8,10 +8,20 @@
 // runs keeps the output device open even in silence, and other apps can see that: so the one
 // context here is made for the first sound, put to sleep two seconds after the last, and woken for
 // the next. Nothing else in the page may make a context of its own.
+//
+// Inside the app the page plays none of Jarvis's voice itself: it hands each sentence to the app
+// (bridge action "speech", and "speech_stop"), which plays it through the engine whose microphone
+// cancels it, so that the user can talk over him. The app tells the page what it plays through
+// window.jarvisVoice: {type: "playing", id, seq, text}, {type: "level", level}, {type: "quiet", id}
+// and {type: "stopped", id} (it stopped by itself: the user talked over him). It also tells the
+// service when the voice starts and stops sounding; the page does not. The wake tone stays here.
+// The app cancels his voice out of the microphone only during a conversation: the page says when one
+// begins ("speech_soon": a spoken message has ended, an answer is coming) and while the user is still
+// talking in one ("speech_keep").
 
 import { useSyncExternalStore } from "react";
 import type { SpeechMessage } from "./api";
-import { IN_APP } from "./bridge";
+import { IN_APP, native } from "./bridge";
 import { voiceOut } from "./levels";
 
 /** What the page knows about Jarvis's voice right now. */
@@ -68,6 +78,7 @@ let acting = 0;
 let meter = 0;
 let sounding: string | null = null; // the speech the service was last told is playing
 let report: ((id: string, playing: boolean) => void) | null = null;
+let appLevel = 0; // inside the app: how loud the app says the voice is, 0 to 1
 let toned = 0;
 const listeners = new Set<() => void>();
 
@@ -199,9 +210,9 @@ export function onPlaying(listener: ((id: string, playing: boolean) => void) | n
   report = listener;
 }
 
-/** Notes which speech is sounding, `null` for none, and reports the change. */
+/** Notes which speech is sounding, `null` for none, and reports the change. Inside the app the app reports it. */
 function tell(id: string | null): void {
-  if (sounding === id) return;
+  if (IN_APP || sounding === id) return;
   if (sounding !== null) report?.(sounding, false);
   sounding = id;
   if (id !== null) report?.(id, true);
@@ -211,6 +222,10 @@ function tell(id: string | null): void {
 
 function measure(): void {
   meter = requestAnimationFrame(measure);
+  if (IN_APP) {
+    voiceOut.level += (appLevel - voiceOut.level) * 0.5;
+    return;
+  }
   if (!analyser || !samples) return;
   // A context that is not running has nothing new to measure, and what its analyser last saw is not the
   // voice now: the meter settles to zero instead of holding that.
@@ -228,6 +243,7 @@ function measure(): void {
 function quiet(): void {
   cancelAnimationFrame(meter);
   meter = 0;
+  appLevel = 0;
   voiceOut.level = 0;
   show(SILENT);
   tell(null);
@@ -300,6 +316,7 @@ function pump(): void {
 
 /** Takes one sentence of audio. A different id from the one playing replaces it. */
 export function enqueue(msg: SpeechMessage): void {
+  if (IN_APP) return handOver(msg);
   if (typeof AudioContext === "undefined") return; // no sound on this machine; the text is still shown
   if (hushed.has(msg.id)) return;
   if (session?.id !== msg.id) {
@@ -321,6 +338,60 @@ export function enqueue(msg: SpeechMessage): void {
     });
 }
 
+// ---------- inside the app: the app plays, the page follows ----------
+
+/** Gives one sentence to the app to say. */
+function handOver(msg: SpeechMessage): void {
+  if (hushed.has(msg.id)) return;
+  if (session?.id !== msg.id) {
+    stop();
+    session = { id: msg.id, clips: new Map(), next: msg.seq, source: null, blocked: 0 };
+  }
+  native("speech", { id: msg.id, seq: String(msg.seq), text: msg.text, url: msg.url });
+}
+
+type AppVoiceEvent =
+  | { type: "playing"; id: string; seq: number; text: string }
+  | { type: "level"; level: number }
+  | { type: "quiet"; id: string }
+  | { type: "stopped"; id: string };
+
+/** What the app says about the voice it plays. */
+function fromApp(event: AppVoiceEvent): void {
+  if (event.type === "level") {
+    appLevel = Math.min(1, event.level * GAIN);
+    return;
+  }
+  if (session?.id !== event.id) return; // about a speech the page has already let go of
+  if (event.type === "playing") {
+    show({ speaking: true, saying: event.text });
+    if (!meter) meter = requestAnimationFrame(measure);
+  } else if (event.type === "quiet") {
+    quiet();
+  } else {
+    hushed.add(event.id);
+    session = null;
+    quiet();
+  }
+}
+
+if (IN_APP) (window as unknown as { jarvisVoice?: (event: AppVoiceEvent) => void }).jarvisVoice = fromApp;
+
+let keptAt = 0;
+
+/** Inside the app: a spoken message has ended, so a spoken answer is coming. */
+export function soon(): void {
+  if (IN_APP) native("speech_soon");
+}
+
+/** Inside the app: the user is talking; a conversation that is on stays on. At most every two seconds. */
+export function keep(): void {
+  const now = performance.now();
+  if (!IN_APP || now - keptAt < 2000) return;
+  keptAt = now;
+  native("speech_keep");
+}
+
 /** Whether Jarvis is in the middle of saying something, the gaps between his sentences included. */
 export function midSpeech(): boolean {
   return session !== null;
@@ -332,6 +403,7 @@ export function stop(): void {
   clearTimeout(linger);
   clearTimeout(acting);
   const source = session?.source;
+  if (IN_APP && session) native("speech_stop");
   if (session) {
     hushed.add(session.id);
     if (hushed.size > HUSHED_KEPT) hushed.delete(hushed.values().next().value as string);

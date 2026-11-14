@@ -327,6 +327,9 @@ export function useJarvis(view: View) {
         if (sound) voice.enqueue(msg);
         return;
       }
+      // Inside the app: a spoken message has ended (an answer is coming), or the user is still talking.
+      if (sound && msg.type === "turn" && msg.spoken) voice.soon();
+      if (sound && msg.type === "voice" && (msg.phase === "listening" || msg.phase === "partial")) voice.keep();
       // The user is speaking, or a new exchange began: whatever was being said is cut short.
       const woke = msg.type === "ear" && msg.phase === "awake";
       if (sound && (woke || msg.type === "turn" || (msg.type === "voice" && msg.phase === "listening"))) voice.stop();

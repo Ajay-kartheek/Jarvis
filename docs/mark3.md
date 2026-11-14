@@ -73,6 +73,19 @@ Card kind `approval` with field `approval: <id>`; `POST /api/approvals/<id> {app
   the phrase. Saying the phrase while Jarvis is speaking stops the speech and listens.
 - Events: `{type:"ear", phase:"asleep"|"awake"|"off"}`; then the `voice` events as for a held key.
 - Setting `wake_word` (bool). `GET /api/state` has `ear: {on, awake}`.
+- Talking over Jarvis. Inside the app his voice is played by the app (bridge `speech` / `speech_stop`, events
+  back through `window.jarvisVoice`; the app posts `/api/voice/playing`). During a conversation on the speakers
+  the app's engine has voice processing on its input, which cancels his voice, and the ear connects as
+  `WS /ws/ear?echo=cancelled` (`none` with headphones, `present` otherwise). Then any confident voice of a quarter
+  of a second while he speaks stops him: the service sends `{"type":"hush"}` on that socket, hushes the speech
+  and takes the words as the next message, name or not.
+- A conversation begins when a spoken message has ended (the key let go, or bridge `speech_soon`, which the page
+  sends on a spoken `turn`) or when he begins to say something by himself, and ends 20 s after his voice last
+  went quiet (bridge `speech_keep`, sent while the user is talking, keeps it open). Outside one the ear hears the
+  plain microphone. Voice processing changes the microphone for every app while it runs, so it is never started
+  while the app records straight from the device, and it stops the moment a call begins or is listened to,
+  before the daemon hears of the call. Never with headphones or a Bluetooth microphone; `echo_cancellation:
+  false` in app.json turns it off.
 
 ### 6. Speaking up
 - After a sync that brought new mail, a small model looks at the new mail with today's agenda and the user's

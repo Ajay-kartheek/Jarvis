@@ -11,7 +11,10 @@
 // socket exists waits in memory and is sent first, in order. A tap throws it away.
 //
 // Which microphone: the system's default input, except that a Bluetooth one (earphones)
-// is left alone when the Mac has a microphone of its own (see VoiceMicrophone).
+// is left alone when the Mac has a microphone of its own (see VoiceMicrophone). While the engine
+// that plays Jarvis's voice has its echo-cancelled microphone open (the ear on the speakers), the
+// message is taken from that instead: the device itself cannot be read then, and Jarvis's voice,
+// if he is still talking when the key goes down, is not in it.
 
 import AVFoundation
 import Foundation
@@ -145,6 +148,8 @@ final class VoiceController: NSObject, URLSessionWebSocketDelegate {
   var maxSeconds: TimeInterval = 120
   /// Called on the main queue when a message that was asked for is over, however it ended.
   var onEnded: (() -> Void)?
+  /// The engine with the echo-cancelled microphone.
+  var speaker: Speaker?
 
   // Everything below is touched on this queue only.
   private let queue = DispatchQueue(label: "jarvis.app.voice", qos: .userInitiated)
@@ -303,6 +308,9 @@ final class VoiceController: NSObject, URLSessionWebSocketDelegate {
 
   private func makeSoundSource() -> SoundSource {
     if TestMode.text("JARVIS_TEST_MIC") == "ramp" { return RampSource(onAudio: onAudio()) }
+    if let speaker, speaker.microphoneOpen, chosen.direct == InputDevice.systemDefault() {
+      return EchoCancelledMicrophone(speaker: speaker, onAudio: onAudio())
+    }
     if let device = chosen.direct { return DeviceCapture(device: device, onAudio: onAudio()) }
     return makeMicCapture()
   }
@@ -334,6 +342,8 @@ final class VoiceController: NSObject, URLSessionWebSocketDelegate {
       device = "\"\(InputDevice.name(of: engine.boundDevice))\""
     case let direct as DeviceCapture:
       device = "\"\(InputDevice.name(of: direct.device))\" at \(direct.rate) Hz"
+    case is EchoCancelledMicrophone:
+      device = "the echo-cancelled \"\(chosen.name)\""
     default:
       device = "the test signal"
     }

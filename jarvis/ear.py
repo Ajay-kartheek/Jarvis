@@ -16,6 +16,13 @@ no name. While Jarvis himself is speaking only the name counts, which is how he 
 which the microphone hears as well, is never taken for a message. Through the speakers that means the name is heard
 when it follows a pause in what the microphone hears, between his sentences say; through headphones, at any time.
 
+Unless the app cancels his voice out of the microphone (it says so when it connects: ``echo=cancelled``). Then the
+user can simply talk over him: a quarter of a second of confident voice while he speaks stops him at once (the app
+is told ``{"type": "hush"}`` on the same connection, and the service is told through ``on_listening``) and is the
+start of the user's next message, name or not. What is left of his voice after cancelling was measured about 100 dB
+down, far below the level a voice must have to count; and a message that turns out to be mostly his own words, three
+or more in a row, is dropped rather than answered.
+
 Whether someone is speaking is decided by Silero's voice-activity model (MIT), because loudness alone takes a
 keyboard or a door for a voice. It is fetched once by ``download`` into the data folder and loaded by path; nothing
 is fetched at run time. The recogniser is taken when a voice begins and given back once the utterance has been
@@ -87,6 +94,17 @@ FOLLOW_UP_SECONDS = 8.0  # after Jarvis has answered, speech without the name is
 ECHO_SECONDS = 0.3  # ...but not at once: his last word is still on its way here, and then in the room
 REPLY_SECONDS = 20.0  # how long to stay awake for an answer that has not begun to be spoken
 PENDING_FRAMES = 300  # sound waiting to be attended to beyond this (half a minute) is dropped
+
+# Talking over Jarvis, when the app cancels his voice out of the microphone (see above).
+CANCELLED = "cancelled"  # what the app says when it connects, if his voice is cancelled
+BARGE_SECONDS = 0.22  # this much voice while he speaks stops him (seven windows: a short "stop" is enough)...
+BARGE_THRESHOLD = 0.7  # ...in windows the voice model is at least this sure of
+BARGE_DIPS = 1  # a window below that inside the voice is forgiven, a second one in a row starts the count again
+BARGE_LEVEL_DB = -65.0  # ...and no quieter than this (dBFS): what is left of his voice was about -100 dBFS
+BARGE_GUARD_SECONDS = 0.2  # not in the first moment after he begins: his first syllable and the word of it may differ
+BARGE_PREROLL_SECONDS = 0.3  # sound from before the voice that goes with the message
+ECHO_SHARE = 0.8  # a message this much of which is his own words, three or more in a row, is his voice coming back
+ECHO_WORDS = 4  # ...if it is at least this long: a short "stop" or "wait" never is
 
 VOICE_FILES = "https://raw.githubusercontent.com/snakers4/silero-vad/v6.2.3/src/silero_vad/data/"
 VOICE = "silero_vad_16k_op15.onnx"
@@ -365,6 +383,20 @@ def _said(text: str) -> str:
     return text[:1].upper() + text[1:]
 
 
+def _echoes(heard: str, said: str) -> bool:
+    """Whether ``heard`` is mostly Jarvis's own words coming back: runs of three or more words of what he ``said``
+    cover at least ``ECHO_SHARE`` of it. A short "stop" or "wait" never is, nor a question that quotes him."""
+    words, his = _WORDS.findall(heard.lower()), _WORDS.findall(said.lower())
+    if len(words) < ECHO_WORDS or len(his) < 3:
+        return False
+    runs = {tuple(his[index:index + 3]) for index in range(len(his) - 2)}
+    covered: set[int] = set()
+    for index in range(len(words) - 2):
+        if tuple(words[index:index + 3]) in runs:
+            covered.update((index, index + 1, index + 2))
+    return len(covered) >= ECHO_SHARE * len(words)
+
+
 # --- hearing an utterance begin -------------------------------------------------------
 
 
@@ -388,6 +420,34 @@ class _Onset:
                 self._run += 1
                 began = began or self._run >= ONSET_WINDOWS
         return began
+
+
+class _BargeIn:
+    """Hears the user talk over Jarvis, when his voice is cancelled out of the microphone: a voice the voice model is
+    sure of that lasts a quarter of a second, and is loud enough not to be what is left of his."""
+
+    def __init__(self) -> None:
+        self._needed = round(BARGE_SECONDS * SAMPLE_RATE / WINDOW)
+        self.reset()
+
+    def reset(self) -> None:
+        self._run = 0  # sure windows in the current voice
+        self._dips = 0  # unsure ones in a row since the last sure one
+
+    def heard(self, chances: list[float], frame: np.ndarray) -> bool:
+        """``chances``: the windows the latest ``frame`` completed. True when the user is talking over him."""
+        level = 10 * float(np.log10(np.mean(np.square(frame, dtype=np.float64)) + 1e-12))
+        loud = level >= BARGE_LEVEL_DB
+        for chance in chances:
+            if chance >= BARGE_THRESHOLD and loud:
+                self._run, self._dips = self._run + 1, 0
+            elif self._run and self._dips < BARGE_DIPS:
+                self._dips += 1
+            else:
+                self._run, self._dips = 0, 0
+            if self._run >= self._needed:
+                return True
+        return False
 
 
 class _Starts:
@@ -545,8 +605,10 @@ class _Message:
     def __init__(
         self, before: np.ndarray, loading: asyncio.Future, *, called: bool, interrupting: bool = False,
         spoke: bool | None = None, quiet: int = 0, gain: float | None = None, words: tuple[str, ...] = (),
+        over_him: bool = False,
     ) -> None:
         self.called = called  # by the name; otherwise it began with speech in a follow-up
+        self.over_him = over_him  # it began while Jarvis was speaking: his words may come back in it
         self.vocabulary = words  # the user's names and terms
         self.loading = loading  # the recogniser, when it has come
         self.loading.add_done_callback(_looked_at)
@@ -639,11 +701,13 @@ class Ear:
     def __init__(
         self, publish: Callable[[dict], None], on_message: Callable[[str], None],
         on_listening: Callable[[], None] | None = None, vocabulary: Callable[[], list[str]] | None = None,
+        said: Callable[[], str] | None = None,
     ) -> None:
         self._publish = publish
         self._on_message = on_message
         self._on_listening = on_listening
         self._vocabulary = vocabulary
+        self._said = said  # what Jarvis has said lately, to know his words when they come back
         self._phase = OFF
         self._connection = 0  # counts connections: only the newest is listened to
         self._serving = False
@@ -661,9 +725,13 @@ class Ear:
         self._restarted = True
         self._onset = _Onset(after_quiet=True)
         self._starts = _Starts()
+        self._barge = _BargeIn()
+        self._barge_from = 0  # no talking over him is heard before this, after he began
+        self._echo: str | None = None  # what the app said of his voice in the microphone: "cancelled", ...
+        self._socket = None  # the app's connection, to tell it to stop his voice
         self._thread: ThreadPoolExecutor | None = None
         self.headphones = False  # Jarvis's voice goes to headphones: the microphone never hears it
-        self.stats = {"utterances": 0, "decodes": 0, "seconds": 0.0, "wakes": 0}
+        self.stats = {"utterances": 0, "decodes": 0, "seconds": 0.0, "wakes": 0, "barge_ins": 0, "echoes": 0}
 
     @property
     def state(self) -> str:
@@ -672,8 +740,17 @@ class Ear:
 
     # --- what the service tells it ------------------------------------------------
 
+    @property
+    def cancelled(self) -> bool:
+        """The app cancels Jarvis's voice out of the microphone: the user can talk over him."""
+        return self._echo == CANCELLED
+
     def speaking_started(self) -> None:
-        """Jarvis begins to speak. Until he has finished only the name counts: his voice is not the user's."""
+        """Jarvis begins to speak. Until he has finished only the name counts: his voice is not the user's. Unless his
+        voice is cancelled out of the microphone: then any voice that lasts stops him."""
+        if not self._speaking:
+            self._barge.reset()
+            self._barge_from = self._received + int(BARGE_GUARD_SECONDS * SAMPLE_RATE)
         self._speaking = True
         if self._spotter is not None:
             self._spotter.his = True
@@ -715,8 +792,9 @@ class Ear:
 
     # --- the connection -------------------------------------------------------------
 
-    async def serve(self, websocket) -> None:
-        """One connection from the app: frames in until it closes."""
+    async def serve(self, websocket, echo: str | None = None) -> None:
+        """One connection from the app: frames in until it closes. ``echo``: what the app says of Jarvis's voice in the
+        sound it sends, "cancelled" when it is cancelled out of it."""
         try:
             voice = await self._work(_load)
             background = _Background()
@@ -729,6 +807,8 @@ class Ear:
         self._drop_message()  # of a connection this one takes over from
         self._drop_spotter()
         self._serving = True
+        self._echo, self._socket = echo, websocket
+        log.info("ear: connected; Jarvis's voice in the microphone: %s", echo or "not said")
         self._received = self._heard = self._deaf_until = self._until = self._spot_from = 0
         if not self._paused:
             self._begin()
@@ -746,6 +826,7 @@ class Ear:
             receiving.cancel()
             if mine == self._connection:
                 self._serving = False
+                self._socket = None
                 self._drop_message()
                 self._drop_spotter()
                 self._enter(OFF)
@@ -801,6 +882,10 @@ class Ear:
             return
         if spotter is not None and spotter is self._spotter and self._spotted(spotter):
             return
+        if self._speaking and self.cancelled and phase in (ASLEEP, REPLYING) and self._heard > self._barge_from:
+            if self._barge.heard(chances, frame):
+                self._barge_in()
+                return
         if phase == FOLLOW_UP:
             if self._heard <= self._deaf_until:
                 return
@@ -817,6 +902,29 @@ class Ear:
             self._look_at(*began)
         if self._phase == REPLYING and not self._speaking and self._heard >= self._until:
             self._enter(ASLEEP)
+
+    def _barge_in(self) -> None:
+        """The user is talking over Jarvis: he stops at once, and what the user says is the next message."""
+        self.stats["barge_ins"] += 1
+        log.info("ear: the user talked over Jarvis")
+        self._drop_spotter()
+        self._tell_app({"type": "hush"})
+        back = int((BARGE_SECONDS * 2 + BARGE_PREROLL_SECONDS) * SAMPLE_RATE)  # the voice from its start, and before
+        self._take(called=False, before=self._ring[-back:], over_him=True)
+
+    def _tell_app(self, message: dict) -> None:
+        """Send ``message`` to the app on its connection, without waiting."""
+        socket = self._socket
+        if socket is None:
+            return
+
+        async def send() -> None:
+            try:
+                await socket.send_json(message)
+            except Exception:  # the connection is going; the page stops the voice as well
+                pass
+
+        asyncio.ensure_future(send())
 
     def _look_at(self, back: int, gap: int) -> None:
         """An utterance began ``back`` samples ago, after ``gap`` samples of quiet: look at its start for the name."""
@@ -842,16 +950,19 @@ class Ear:
         return False
 
     def _take(self, *, called: bool, before: np.ndarray | None = None, loading: asyncio.Future | None = None,
-              spoke: bool = False, quiet: int = 0, his: bool = False, gain: float | None = None) -> None:
+              spoke: bool = False, quiet: int = 0, his: bool = False, gain: float | None = None,
+              over_him: bool = False) -> None:
         """Start taking a message.
 
         Called by the name, ``before`` is the sound after the name, ``loading`` the recogniser that heard it,
         ``quiet`` how long it has been quiet since, and ``his`` whether Jarvis spoke while it was said. Otherwise
         the message is a follow-up that began with a voice just now, and gets the sound from just before it. But
         nothing from while Jarvis was speaking out loud: told "listening" the page stops the playback; what he was
-        saying until then, and the words said over it, are not the user's message.
+        saying until then, and the words said over it, are not the user's message. (With headphones, or his voice
+        cancelled out of the microphone, they are: there is nothing of his in the sound.)
         """
-        interrupting, self._speaking = (self._speaking or his) and not self.headphones, False
+        over_him = over_him or self._speaking or his
+        interrupting, self._speaking = over_him and not (self.headphones or self.cancelled), False
         if interrupting:
             before, spoke, quiet, gain = self._ring[:0], False, 0, None  # the level was his as much as the user's
         elif before is None:
@@ -865,7 +976,15 @@ class Ear:
         self._message = _Message(
             before, loading if loading is not None else self._work(_recogniser), called=called,
             interrupting=interrupting, spoke=spoke if called else None, quiet=quiet, gain=gain, words=self._words(),
+            over_him=over_him and not interrupting,
         )
+
+    def _his_own(self, text: str) -> bool:
+        """Whether ``text`` is mostly what Jarvis said lately."""
+        try:
+            return self._said is not None and _echoes(text, self._said())
+        except Exception:
+            return False
 
     def _words(self) -> tuple[str, ...]:
         try:
@@ -893,6 +1012,10 @@ class Ear:
                 return
         self._message = None
         message.close()
+        if final and message.over_him and self._his_own(final):
+            log.info("ear: a message taken over Jarvis's voice was his own words; dropped")
+            self.stats["echoes"] += 1
+            final = ""
         if message.failed is not None:  # say why nothing came of it instead of leaving the orb listening
             self._publish({"type": "info", "text": f"Jarvis could not hear that: {message.failed}"})
         if final:

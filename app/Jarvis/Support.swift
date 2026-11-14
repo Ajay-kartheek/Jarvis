@@ -154,6 +154,8 @@ struct AppConfig: Equatable {
   var prompts: Bool
   /// Which microphone talking to Jarvis uses.
   var voiceInput: VoiceInput
+  /// On the speakers, cancel Jarvis's voice out of the microphone, so the user can talk over him.
+  var echoCancellation: Bool
 
   static let defaultPort = 8765
   static let defaultCallApps = [
@@ -184,6 +186,7 @@ struct AppConfig: Equatable {
       callApps: callApps?.isEmpty == false ? callApps! : defaultCallApps,
       hideFromScreenShare: raw["hide_from_screen_share"] as? Bool ?? true,
       prompts: raw["prompts"] as? Bool ?? true,
-      voiceInput: VoiceInput(setting: raw["voice_input"]))
+      voiceInput: VoiceInput(setting: raw["voice_input"]),
+      echoCancellation: raw["echo_cancellation"] as? Bool ?? true)
   }
 }

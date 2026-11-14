@@ -10,6 +10,15 @@
 // The ear never opens a Bluetooth microphone (that would switch earphones to call mode and
 // keep them there). It uses the same microphone as a spoken message (see VoiceMicrophone); if
 // that is a Bluetooth one, it does not run, and says "no_microphone".
+//
+// During a conversation on the speakers it hears the echo-cancelled microphone of the engine that
+// plays Jarvis's voice (Speaker.swift), so that the user can talk over him; the rest of the time,
+// the plain microphone, as before. It changes over by letting go of one microphone before it takes
+// the other, so that voice processing never starts while the device is being recorded straight
+// from. The daemon is told which it gets in the address it connects to: ws://.../ws/ear?echo=cancelled
+// (his voice is cancelled), echo=none (headphones: the microphone does not hear him) or echo=present
+// (it hears him). The daemon may send {"type": "hush"} back: it heard the user talk over Jarvis,
+// who stops at once.
 
 import AVFoundation
 import Foundation
@@ -27,6 +36,10 @@ struct EarConditions: Equatable {
   var messageActive = false
   var port = AppConfig.defaultPort
   var setting = VoiceInput.auto
+  /// Jarvis's voice may be cancelled out of the microphone (see Speaker.setVoiceProcessingAllowed).
+  var echoCancellation = false
+  /// The Mac plays through headphones: the microphone does not hear Jarvis.
+  var headphones = false
 }
 
 final class EarController: NSObject, URLSessionWebSocketDelegate {
@@ -47,6 +60,10 @@ final class EarController: NSObject, URLSessionWebSocketDelegate {
 
   /// Called on the main queue when what the ear reports about itself has changed.
   var onStateChange: (() -> Void)?
+  /// Called on the main queue when the daemon heard the user talk over Jarvis.
+  var onHush: (() -> Void)?
+  /// The engine with the echo-cancelled microphone.
+  var speaker: Speaker?
 
   // Everything below is touched on this queue only.
   private let queue = DispatchQueue(label: "jarvis.app.ear", qos: .userInitiated)
@@ -56,6 +73,7 @@ final class EarController: NSObject, URLSessionWebSocketDelegate {
 
   private var capture: SoundSource?  // the open microphone; nil when none is open
   private var captureDevice: AudioDeviceID?
+  private var echo = "present"  // what the daemon was told about Jarvis's voice in the microphone
   private var startedAt = DispatchTime.now()
   private var lastSound = DispatchTime.now()
   private var task: URLSessionWebSocketTask?
@@ -107,6 +125,11 @@ final class EarController: NSObject, URLSessionWebSocketDelegate {
       self.conditions = new
       self.reconcile()
     }
+  }
+
+  /// A conversation began or ended: the ear may change microphone.
+  func speakerChanged() {
+    queue.async { self.reconcile() }
   }
 
   /// The app is quitting.
@@ -168,10 +191,17 @@ final class EarController: NSObject, URLSessionWebSocketDelegate {
       setState("off")  // waiting to try again
       return
     }
+    let cancelled = wantsEchoCancelled(choice)
     if capture == nil || task == nil || taskPort != c.port {
       if capture != nil || task != nil { stop(why: "starting over") }
       start(choice)
-    } else if captureDevice != choice.direct {
+    } else if cancelled != (capture is EchoCancelledMicrophone)
+      || (!cancelled && echo != echoName(cancelled: false))
+    {
+      // A different microphone, and the daemon must be told what it hears: a new connection.
+      stop(why: cancelled ? "Jarvis's voice can be cancelled now" : "Jarvis's voice is not cancelled now")
+      start(choice)
+    } else if !cancelled && captureDevice != choice.direct {
       restartMicrophone(choice, why: "the microphone to use is now \"\(choice.name)\"")
     } else if elapsedSeconds(since: lastSound) > EarController.silenceSeconds {
       restartMicrophone(choice, why: "the microphone went quiet")
@@ -193,11 +223,27 @@ final class EarController: NSObject, URLSessionWebSocketDelegate {
 
   // MARK: Running
 
+  /// The echo-cancelled microphone is for a conversation on the speakers, and only when the
+  /// microphone chosen is the default input, which is the one voice processing records from.
+  private func wantsEchoCancelled(_ choice: VoiceMicrophone) -> Bool {
+    guard conditions.echoCancellation, !conditions.headphones, let speaker,
+      TestMode.text("JARVIS_TEST_MIC") != "ramp", choice.direct == InputDevice.systemDefault()
+    else { return false }
+    return speaker.echoCancellationWanted
+  }
+
+  private func echoName(cancelled: Bool) -> String {
+    cancelled ? "cancelled" : conditions.headphones ? "none" : "present"
+  }
+
   private func makeSource(_ choice: VoiceMicrophone) -> SoundSource? {
     let onAudio: (Data, Float) -> Void = { [weak self] data, _ in
       self?.queue.async { self?.heard(data) }
     }
     if TestMode.text("JARVIS_TEST_MIC") == "ramp" { return RampSource(onAudio: onAudio) }
+    if wantsEchoCancelled(choice), let speaker {
+      return EchoCancelledMicrophone(speaker: speaker, onAudio: onAudio)
+    }
     guard let device = choice.direct else { return nil }
     return DeviceCapture(device: device, onAudio: onAudio)
   }
@@ -212,13 +258,18 @@ final class EarController: NSObject, URLSessionWebSocketDelegate {
     }
     capture = source
     captureDevice = choice.direct
+    echo = echoName(cancelled: source is EchoCancelledMicrophone)
     waitingUntil = nil
     startedAt = .now()
     lastSound = .now()
     sentFrames = 0
     droppedFrames = 0
     openSocket()
-    Log.write("ear: started on \"\(choice.name)\" (\(choice.why))")
+    var line = "ear: started on \"\(choice.name)\" (\(choice.why)); Jarvis's voice: \(echo)"
+    if source is EchoCancelledMicrophone, let speaker {
+      line += ", \(speaker.conversationAge) ms after the conversation began"
+    }
+    Log.write(line)
   }
 
   /// A different (or a quiet) microphone under the same connection.
@@ -322,7 +373,7 @@ final class EarController: NSObject, URLSessionWebSocketDelegate {
   // MARK: The connection
 
   private func openSocket() {
-    guard let url = URL(string: "ws://127.0.0.1:\(conditions.port)/ws/ear") else { return }
+    guard let url = URL(string: "ws://127.0.0.1:\(conditions.port)/ws/ear?echo=\(echo)") else { return }
     let task = session.webSocketTask(with: url)
     self.task = task
     taskPort = conditions.port
@@ -359,6 +410,9 @@ final class EarController: NSObject, URLSessionWebSocketDelegate {
           if text.contains("\"error\"") {
             self.retryLater("the daemon said error", after: EarController.errorDelay)
           } else {
+            if text.contains("\"hush\"") {
+              DispatchQueue.main.async { [weak self] in self?.onHush?() }
+            }
             self.listen(task)
           }
         case .success:

@@ -267,7 +267,8 @@ def create_app(config: Config, *, background: bool = False) -> FastAPI:
         await websocket.accept()
         refusal = runtime.ear_refusal()
         if refusal is None:
-            await runtime.ear.serve(websocket)
+            # echo=cancelled: the app cancels Jarvis's voice out of the microphone, so the user can talk over him
+            await runtime.ear.serve(websocket, echo=websocket.query_params.get("echo"))
         else:
             await websocket.send_json({"error": refusal})
         try:

@@ -46,6 +46,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var daemon: DaemonSupervisor?
   private let voice = VoiceController()
   private let ear = EarController()
+  private let speaker = Speaker()  // Jarvis's voice, and the echo-cancelled microphone
   private let monitor = CallMonitor(callApps: AppConfig.defaultCallApps)
   private var hotkey: Hotkey?
   private var commandQMonitor: Any?
@@ -63,6 +64,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   // What the app last saw and sent.
   private var headphones = false
+  private var bluetoothInput = false  // the default input is a Bluetooth microphone
   private var microphone = "undetermined"
   private var systemAudio = "undetermined"
   private var accessibility = "denied"
@@ -120,6 +122,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // page still thinks its button is held; the page's later "stop" then means nothing.
     voice.onEnded = { [weak self] in self?.messageEnded() }
     ear.onStateChange = { [weak self] in self?.reportIfChanged() }
+    // Jarvis's voice is played here, not by the page (see Speaker.swift).
+    speaker.port = port
+    voice.speaker = speaker
+    ear.speaker = speaker
+    ear.onHush = { [weak self] in
+      self?.speaker.hush(reason: "the ear heard the user talk over him", tellPage: true)
+    }
+    speaker.onPageEvent = { [weak self] event in self?.panel.voiceEvent(event) }
+    speaker.onConversationChange = { [weak self] in self?.ear.speakerChanged() }
+    speaker.onPlaying = { [weak self] id, playing in
+      guard let data = try? JSONSerialization.data(withJSONObject: ["id": id, "playing": playing]),
+        let body = String(data: data, encoding: .utf8)
+      else { return }
+      self?.post("/api/voice/playing", body: body)
+    }
+    panel.onPageLost = { [weak self] in self?.speaker.hush(reason: "the page went away") }
     if TestMode.on {
       let settings = Paths.config?.path ?? "nowhere (JARVIS_APP_CONFIG is not set)"
       Log.write(
@@ -128,9 +146,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     monitor.onChange = { [weak self] active, _ in
       guard let self else { return }
+      // First of all, Jarvis's own microphone and voice processing are let go: before the daemon
+      // hears of the call and opens the microphone for it.
+      self.updateEar()
       if active { self.panel.show(reason: "call", activate: false) }
       if active { self.callBegan() } else { self.callEnded() }
-      self.updateEar()
     }
 
     let shortcut = Hotkey.controlOption(
@@ -165,6 +185,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     self.config = config
     port = config.port
     monitor.callApps = config.callApps
+    speaker.port = config.port
     panel.update(port: config.port, hideFromScreenShare: config.hideFromScreenShare)
     dashboard?.update(port: config.port, hideFromScreenShare: config.hideFromScreenShare)
     let supervisor = DaemonSupervisor(config: config)
@@ -426,6 +447,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     timers.forEach { $0.invalidate() }
     ear.shutdown()
     voice.shutdown()
+    speaker.shutdown()
     daemon?.stop()
     Log.flush()
     return .terminateNow
@@ -518,7 +540,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   private func pollAudio() {
     monitor.poll()
+    let wasHeadphones = headphones
+    let wasBluetooth = bluetoothInput
     headphones = OutputDevice.isHeadphones()
+    bluetoothInput =
+      TestMode.flag("JARVIS_TEST_BLUETOOTH")
+      || (InputDevice.systemDefault().map(InputDevice.isBluetooth) ?? false)
+    if headphones != wasHeadphones || bluetoothInput != wasBluetooth { updateEar() }
     if bodyText() != lastBody { heartbeat() }
   }
 
@@ -707,13 +735,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   /// Tells the ear what it needs to know to decide whether it is on.
   private func updateEar() {
-    ear.update(
-      EarConditions(
-        requested: earRequested, daemonIdle: reachable && status == "idle",
-        microphoneAllowed: microphone == "granted", callActive: monitor.active,
-        messageActive: messageInProgress || pageIsTalking
-          || (shortcutIsDown && holding && noVoiceBecause == nil),
-        port: port, setting: voiceInput))
+    // Voice processing only on the speakers, never with a Bluetooth microphone (it would put
+    // earphones in call mode), and not while a call is on or being listened to.
+    let echoCancellation = !headphones && !bluetoothInput && (config?.echoCancellation ?? true)
+    speaker.setVoiceProcessingAllowed(echoCancellation)
+    speaker.setCallActive(monitor.active || (reachable && status != "idle"))
+    let conditions = EarConditions(
+      requested: earRequested, daemonIdle: reachable && status == "idle",
+      microphoneAllowed: microphone == "granted", callActive: monitor.active,
+      messageActive: messageInProgress || pageIsTalking
+        || (shortcutIsDown && holding && noVoiceBecause == nil),
+      port: port, setting: voiceInput, echoCancellation: echoCancellation,
+      headphones: headphones)
+    speaker.setEarExpected(
+      conditions.requested && conditions.daemonIdle && conditions.microphoneAllowed
+        && !conditions.callActive && !conditions.messageActive)
+    ear.update(conditions)
   }
 
   /// A spoken message is over, however it ended.
@@ -878,6 +915,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     case "dashboard": openDashboard()
     case "voice_start": pageVoiceStart()
     case "voice_stop": pageVoiceStop()
+    case "speech":  // one sentence for Jarvis to say: id, seq, text, url
+      let seq = (message["seq"] as? NSNumber)?.intValue ?? Int(message["seq"] as? String ?? "")
+      guard let id = message["id"] as? String, let seq, let url = message["url"] as? String else {
+        Log.write("the page sent a sentence without an id, a number or an address")
+        return
+      }
+      speaker.enqueue(id: id, seq: seq, text: message["text"] as? String ?? "", url: url)
+    case "speech_stop":
+      speaker.hush(reason: "the page stopped him")
+    case "speech_soon":  // a spoken message has ended: his answer is coming
+      speaker.openConversation(reason: "the page: a spoken message")
+    case "speech_keep":  // the user is still talking
+      speaker.keepConversation()
     case "size":
       if let mode = (message["mode"] as? String).flatMap(PanelController.Size.init(rawValue:)) {
         panel.setSize(mode)
@@ -939,7 +989,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     holdTimer = nil
     if holding {
       holding = false
-      if noVoiceBecause == nil { voice.release() }
+      if noVoiceBecause == nil {
+        voice.release()
+        // His answer is coming: the echo-cancelled engine starts while Claude thinks.
+        speaker.openConversation(reason: "a spoken message ended")
+      }
     } else {
       if noVoiceBecause == nil { voice.discard() }
       // A tap while Jarvis is talking stops him; otherwise it shows or hides the panel.
@@ -972,6 +1026,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     guard pageIsTalking else { return }
     pageIsTalking = false
     voice.release()
+    speaker.openConversation(reason: "a spoken message ended")
   }
 
   // MARK: The dashboard

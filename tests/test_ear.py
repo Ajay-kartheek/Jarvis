@@ -25,6 +25,7 @@ RATE = ear.SAMPLE_RATE
 WORD = 0.25  # seconds a word takes
 QUIET, BABBLE, NOISE, COUGH, JARVIS = 0.0, 0.1, 0.2, 0.45, 0.7  # sample values: none, voices far off, a door, a cough
 # (the voice model takes babble, a cough and Jarvis for a voice; the recogniser makes words of none of them)
+LEFT_OVER = 0.0002  # what is left of Jarvis's voice once the app has cancelled it (-74 dBFS): a voice, too faint for words
 SPOKEN: dict[float, str] = {}  # each word said in a test, by the sample value that stands for it
 HIS = "It is ten past nine and the next meeting is at eleven.".split()  # what Jarvis says, from the speakers
 MODEL = object()  # what speech.acquire hands out
@@ -69,6 +70,11 @@ def jarvis(seconds: float) -> np.ndarray:
     return np.full(int(seconds * RATE), JARVIS, dtype=np.float32)
 
 
+def left_over(seconds: float) -> np.ndarray:
+    """Jarvis's own voice as the microphone hears it when the app cancels it: faint, but still a voice."""
+    return np.full(int(seconds * RATE), LEFT_OVER, dtype=np.float32)
+
+
 def recognised(sound: np.ndarray) -> list[tuple[str, float, float]]:
     """What the recogniser stand-in makes of ``sound``: each word of which most was heard, with its times."""
     found = []
@@ -109,7 +115,8 @@ class FakeVoice:
         whole = len(sound) - len(sound) % ear.WINDOW
         self._left = sound[whole:]
         self.windows += whole // ear.WINDOW
-        return [0.9 if window.mean() > 0.4 or (window == np.float32(BABBLE)).any() else 0.05
+        return [0.9 if window.mean() > 0.4 or (window == np.float32(BABBLE)).any()
+                or (window == np.float32(LEFT_OVER)).any() else 0.05
                 for window in sound[:whole].reshape(-1, ear.WINDOW)]
 
 
@@ -273,17 +280,17 @@ class World:
             await asyncio.sleep(0.0005 if threads else 0)
             idle = idle + 1 if self.busy == 0 else 0
 
-    def play(self, *parts, frame: int = 1600, threads: bool = False) -> Socket:
-        """One connection: the parts in order, then it closes."""
+    def play(self, *parts, frame: int = 1600, threads: bool = False, echo: str | None = None) -> Socket:
+        """One connection: the parts in order, then it closes. ``echo``: what the app says of Jarvis's voice in it."""
         socket = Socket(self, parts, frame, threads)
         if threads:
             # put back by monkeypatch when the test is over
             ear.Ear._work = lambda listener, function, *args: self._on_its_thread(listener, function, *args)
-        asyncio.run(self._serve(socket))
+        asyncio.run(self._serve(socket, echo))
         return socket
 
-    async def _serve(self, socket: Socket) -> None:
-        await self.ear.serve(socket)
+    async def _serve(self, socket: Socket, echo: str | None = None) -> None:
+        await self.ear.serve(socket, echo=echo)
         await self.settle()
 
     # --- reading the record ---
@@ -1473,3 +1480,73 @@ def test_the_voice_model_gets_whole_windows_and_keeps_what_is_left_over(monkeypa
     assert int(given[0]["sr"]) == RATE and given[4]["state"][0, 0, 0] == 4  # the state goes from window to window
     voice.reset()
     assert voice.heard(np.zeros(ear.WINDOW, dtype=np.float32)) == [0.75] and given[5]["state"][0, 0, 0] == 0
+
+
+# --- talking over Jarvis, his voice cancelled out of the microphone -------------------------------------------------
+
+HUSH = {"type": "hush"}
+
+
+def test_with_his_voice_cancelled_talk_over_him_stops_him_at_once_and_is_the_next_message(world):
+    socket = world.play(quiet(1), world.ear.speaking_started, left_over(1.5), words("wait what about the budget"),
+                        left_over(0.5), world.ear.speaking_ended, quiet(2), echo="cancelled", frame=800)
+    assert socket.sent == [HUSH]
+    assert world.messages == ["Wait what about the budget"]
+    assert world.listening == 1  # the service is told too: it stops what he was saying, and gets ready
+    began = 1 + 1.5
+    assert 0 < world.when("voice", "listening")[0] - began <= ear.BARGE_SECONDS + 0.15  # within half a second
+    assert without_partials(world.told()) == [ASLEEP, AWAKE, LISTENING, *heard("Wait what about the budget"), OFF]
+
+
+def test_a_single_word_over_him_is_enough(world):
+    socket = world.play(quiet(1), world.ear.speaking_started, quiet(1), words("stop"), quiet(2), echo="cancelled")
+    assert socket.sent == [HUSH] and world.messages == ["Stop"]
+
+
+def test_his_name_over_him_stops_him_too_and_is_left_out_of_the_message(world):
+    world.play(quiet(1), world.ear.speaking_started, quiet(1), call(), words("read the next one"), quiet(2),
+               echo="cancelled")
+    assert world.messages == ["Read the next one"]
+
+
+def test_what_is_left_of_his_voice_after_cancelling_never_stops_him(world):
+    socket = world.play(quiet(1), world.ear.speaking_started, left_over(4), quiet(0.3), left_over(4),
+                        world.ear.speaking_ended, quiet(1), echo="cancelled")
+    assert socket.sent == [] and world.messages == [] and LISTENING not in world.told()
+
+
+def test_a_message_over_him_that_is_only_his_own_words_coming_back_is_dropped(world):
+    world.ear._said = lambda: " ".join(HIS)
+    socket = world.play(quiet(1), world.ear.speaking_started, jarvis(3), world.ear.speaking_ended, quiet(2),
+                        echo="cancelled")  # cancelling failed: his voice reached the microphone loud
+    assert socket.sent == [HUSH]  # he was stopped, which cannot be undone; but he does not answer himself
+    assert world.messages == [] and CANCELLED in world.told() and world.ear.stats["echoes"] == 1
+    assert without_partials(world.told())[-3:] == [CANCELLED, ASLEEP, OFF]
+
+
+def test_a_cough_over_him_is_too_short_to_stop_him(world):
+    cough = np.full(int(0.15 * RATE), COUGH, dtype=np.float32)
+    socket = world.play(quiet(1), world.ear.speaking_started, quiet(1), cough, quiet(1), echo="cancelled")
+    assert socket.sent == [] and LISTENING not in world.told()
+
+
+def test_without_cancelling_talk_over_him_does_not_stop_him(world):
+    socket = world.play(quiet(1), world.ear.speaking_started, jarvis(1), words("wait what about the budget"),
+                        jarvis(1), lambda: world.events.append((0, {"type": "ended"})), world.ear.speaking_ended,
+                        quiet(1))
+    assert socket.sent == []
+    assert ("ended",) in world.told() and LISTENING not in world.told()[: world.told().index(("ended",))]
+
+
+def test_when_he_is_not_speaking_talk_is_not_taken_without_the_name(world):
+    socket = world.play(quiet(1), words("wait what about the budget"), quiet(2), echo="cancelled")
+    assert socket.sent == [] and world.messages == []
+
+
+def test_his_own_words_coming_back_are_told_from_the_users():
+    said = "It is ten past nine and the next meeting is at eleven."
+    assert ear._echoes("the next meeting is at eleven", said)
+    assert ear._echoes("It is ten past nine and", said)
+    assert not ear._echoes("stop", said)
+    assert not ear._echoes("wait, what about the next meeting", said)  # quoting him is a question
+    assert not ear._echoes("open the calendar for tomorrow instead", said)

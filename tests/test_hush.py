@@ -125,3 +125,19 @@ def test_the_page_can_stop_jarvis_talking(fake_home, monkeypatch):
     with TestClient(app) as client:
         assert client.post("/api/voice/stop").json() == {"ok": True}
     assert hushed == [True]
+
+
+def test_a_speech_cut_short_does_not_start_again_when_the_app_reports_its_last_sound(runtime, monkeypatch):
+    told = []
+    monkeypatch.setattr(runtime.ear, "speaking_started", lambda: told.append("started"))
+    monkeypatch.setattr(runtime.ear, "speaking_ended", lambda: told.append("ended"))
+
+    async def scene():
+        assert runtime._speak("s1", 0, "The first of three sentences.")
+        runtime.hush()  # the user talked over him
+        runtime.speaking("s1", True)  # the app began the next sentence just before it heard of it
+        runtime.speaking("s1", False)
+        runtime.speaking("s2", True)  # what he says next is heard as ever
+
+    asyncio.run(scene())
+    assert told == ["ended", "started"]

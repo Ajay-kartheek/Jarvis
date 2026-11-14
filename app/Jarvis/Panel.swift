@@ -45,6 +45,8 @@ final class PanelController: NSObject {
 
   /// What the page asked the app to do (see PageView.onAction).
   var onAction: ((_ action: String, _ message: [String: Any]) -> Void)?
+  /// The page went away (the daemon stopped answering) and is being fetched again.
+  var onPageLost: (() -> Void)?
 
   private let panel: JarvisPanel
   private let page: PageView
@@ -69,7 +71,7 @@ final class PanelController: NSObject {
     panel = JarvisPanel(
       contentRect: PanelController.defaultFrame(for: .full),
       styleMask: PanelController.fullStyle, backing: .buffered, defer: false)
-    page = PageView(name: "panel", query: "panel=1", port: port)
+    page = PageView(name: "panel", query: "panel=1", port: port, runsHidden: true)
     super.init()
 
     panel.title = "Jarvis"
@@ -120,7 +122,10 @@ final class PanelController: NSObject {
     page.mark(titleStrip: titleStripHeight)
     page.webView.dragZone = dragZoneHeight
     page.onAction = { [weak self] action, message in self?.onAction?(action, message) }
-    page.onLost = { [weak self] in self?.placeholder.isHidden = false }
+    page.onLost = { [weak self] in
+      self?.placeholder.isHidden = false
+      self?.onPageLost?()
+    }
     page.onLoaded = { [weak self] title in
       guard let self else { return }
       self.placeholder.isHidden = true
@@ -158,8 +163,13 @@ final class PanelController: NSObject {
     }
   }
 
-  /// Stops Jarvis talking, if he is, and says whether he was. The page knows: it plays the voice.
-  /// (A page that is not there says no.)
+  /// What happens to Jarvis's voice, which the app plays: a JSON event for the page.
+  func voiceEvent(_ event: String) {
+    page.run("window.jarvisVoice && window.jarvisVoice(\(event))")
+  }
+
+  /// Stops Jarvis talking, if he is, and says whether he was. The page knows: it hands his voice to
+  /// the app sentence by sentence. (A page that is not there says no.)
   func interrupt(_ done: @escaping (Bool) -> Void) {
     page.ask("window.jarvisInterrupt ? window.jarvisInterrupt() === true : false", done)
   }

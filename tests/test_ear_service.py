@@ -106,15 +106,20 @@ def test_the_ear_socket_hands_the_stream_to_the_ear_when_it_is_wanted(client, mo
     report(client)
     taken = []
 
-    async def serve(websocket):
-        taken.append((await websocket.receive())["bytes"])
+    async def serve(websocket, echo=None):
+        taken.append(((await websocket.receive())["bytes"], echo))
 
     monkeypatch.setattr(client.runtime.ear, "serve", serve)
     with client.websocket_connect("/ws/ear") as socket:
         socket.send_bytes(b"\x00\x00\x00\x00" * 1600)
         with pytest.raises(WebSocketDisconnect):
             socket.receive_text()  # closed once the ear is done with it
-    assert taken == [b"\x00\x00\x00\x00" * 1600]
+    # The app says in the address whether Jarvis's voice is cancelled out of the sound it sends.
+    with client.websocket_connect("/ws/ear?echo=cancelled") as socket:
+        socket.send_bytes(b"\x00\x00\x00\x00" * 1600)
+        with pytest.raises(WebSocketDisconnect):
+            socket.receive_text()
+    assert taken == [(b"\x00\x00\x00\x00" * 1600, None), (b"\x00\x00\x00\x00" * 1600, "cancelled")]
 
 
 def test_the_ear_itself_refuses_when_its_voice_model_cannot_be_loaded(client):

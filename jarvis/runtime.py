@@ -309,7 +309,8 @@ class Runtime:
         self.tasks = Tasks(self)
         self.approvals = Approvals(self)
         self.core = Core(config, self)
-        self.ear = Ear(self.hub.publish, self._heard_by_ear, on_listening=self.heard_starting, vocabulary=self._vocabulary)
+        self.ear = Ear(self.hub.publish, self._heard_by_ear, on_listening=self.heard_starting, vocabulary=self._vocabulary,
+                       said=self._said_lately)
         self.attention = 0
         self.notices: dict[str, str] = {}
         self.cards: list[dict] = []  # newest first
@@ -438,9 +439,16 @@ class Runtime:
         except AgentError:
             pass  # already shown as the turn's error
 
+    def _said_lately(self) -> str:
+        """What Jarvis has said in the last few minutes, all speeches together."""
+        return " ".join(self._said.values())
+
     def speaking(self, speech_id: str, playing: bool) -> None:
-        """The page says Jarvis's voice started or stopped playing. The ear must not take his voice for the user's,
-        and listens for a follow-up once it has stopped."""
+        """The app (or, in a browser, the page) says Jarvis's voice started or stopped playing. The ear must not take
+        his voice for the user's, and listens for a follow-up once it has stopped. A speech the user cut short does not
+        start again: what still sounds of it is on its way out."""
+        if playing and speech_id in self._hushed:
+            return
         self._voice_playing = playing
         if playing:
             self.ear.speaking_started()

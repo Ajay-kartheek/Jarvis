@@ -92,7 +92,11 @@ final class PageView: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
   private var port: Int
   private var retry: DispatchWorkItem?
 
-  init(name: String, query: String, port: Int) {
+  /// `runsHidden`: the page keeps working while its window is not on screen. The panel's page must:
+  /// it hands Jarvis's sentences to the app and follows the conversation. (By default WebKit
+  /// suspends a page whose window is hidden a few seconds after it was last seen, and what the
+  /// daemon sends it then waits until the window is shown again.)
+  init(name: String, query: String, port: Int, runsHidden: Bool = false) {
     self.name = name
     self.query = query
     self.port = port
@@ -100,6 +104,7 @@ final class PageView: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
     configuration.applicationNameForUserAgent = "Jarvis"
     // Jarvis speaks through the page, and nobody clicks before it does.
     configuration.mediaTypesRequiringUserActionForPlayback = []
+    configuration.preferences.inactiveSchedulingPolicy = runsHidden ? .throttle : .suspend
     webView = PageWebView(frame: .zero, configuration: configuration)
     super.init()
     // Whatever is behind the web view shows until the page has drawn itself.
