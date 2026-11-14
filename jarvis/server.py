@@ -240,7 +240,7 @@ def create_app(config: Config, *, background: bool = False) -> FastAPI:
             raise HTTPException(503, f"That sentence could not be spoken: {exc}") from None
         if audio is None:
             raise HTTPException(404, "That sentence is no longer kept.")
-        return Response(content=audio, media_type="audio/wav")
+        return Response(content=audio, media_type="audio/wav" if audio[:4] == b"RIFF" else "audio/mpeg")
 
     @app.websocket("/ws/voice")
     async def voice_socket(websocket: WebSocket) -> None:

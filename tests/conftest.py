@@ -50,6 +50,17 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def no_cloud_voice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never read the user's real ElevenLabs key, so no test speaks through the network by accident."""
+    from jarvis import eleven
+
+    monkeypatch.setattr(eleven, "_key", lambda: None)
+    monkeypatch.setattr(eleven, "_client", None)
+    monkeypatch.setattr(eleven, "_resting_until", 0.0)
+    monkeypatch.setattr(eleven, "_credits", None)
+
+
+@pytest.fixture(autouse=True)
 def example_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests read the example settings, never the user's own config.toml."""
     example = Path(__file__).resolve().parent.parent / "config.example.toml"

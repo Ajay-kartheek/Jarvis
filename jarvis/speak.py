@@ -1,9 +1,13 @@
-"""Jarvis's speaking voice: text in, the bytes of a WAV file out, all on this Mac.
+"""Jarvis's speaking voice: text in, the bytes of a sound file out.
 
 Nothing here plays a sound. The audio is handed to the interface, which decides
 when it is heard; that matters when the user is on a call with headphones in.
 
-The first choice is Kokoro-82M through mlx-audio, a calm British man
+When the user has given Jarvis an ElevenLabs key, the voice comes from there
+(see ``eleven``): what Jarvis says is sent to ElevenLabs, and comes back as MP3.
+Whenever that voice cannot speak, the voice on this Mac does.
+
+On this Mac the first choice is Kokoro-82M through mlx-audio, a calm British man
 (``bm_george``): about a tenth of real time on Apple silicon, and entirely
 offline once its weights are in the Hugging Face cache (``download`` puts them
 there once). If Kokoro cannot be used, because a package or the weights are
@@ -39,6 +43,8 @@ import threading
 import wave
 from pathlib import Path
 
+from jarvis import eleven
+
 log = logging.getLogger("jarvis")
 
 SAY = "/usr/bin/say"
@@ -69,10 +75,21 @@ _failed = False
 
 
 def engine() -> str | None:
-    """The voice that will speak: "kokoro", "system" or None. Looks at the disk, never loads a model."""
+    """The voice that will speak: "elevenlabs", "kokoro", "system" or None. Never loads a model."""
+    if _cloud_wanted() and eleven.available():
+        return "elevenlabs"
+    return local_engine()
+
+
+def local_engine() -> str | None:
+    """The voice on this Mac: "kokoro", "system" or None. Looks at the disk, never loads a model."""
     if _kokoro_wanted() and (_pipeline is not None or _kokoro_ready()):
         return "kokoro"
     return "system" if _say_available() else None
+
+
+def _cloud_wanted() -> bool:
+    return os.environ.get(ENGINE_ENV, "").strip().lower() not in ("system", "local")
 
 
 def _kokoro_wanted() -> bool:
@@ -140,7 +157,11 @@ def _load():
 
 
 def warm() -> None:
-    """Load Kokoro now, so the first sentence does not wait for it. Does nothing for the system voice."""
+    """Get the voice ready, so the first sentence does not wait for it: the cloud voice's connection, or Kokoro.
+    Does nothing for the system voice."""
+    if engine() == "elevenlabs":
+        eleven.warm()
+        return
     if engine() != "kokoro":
         return
     with _lock:
@@ -257,12 +278,19 @@ def _plain_wav(data: bytes) -> bytes:
 # --- speaking ---------------------------------------------------------------
 
 
-def synthesize(text: str) -> bytes:
-    """``text`` spoken, as the bytes of one WAV file (mono, 16-bit). Blocks; any number of threads may call it."""
+def synthesize(text: str, previous: str = "") -> bytes:
+    """``text`` spoken, as the bytes of one sound file: MP3 from the cloud voice, otherwise WAV (mono, 16-bit).
+    ``previous`` is what was said just before in the same reply; the cloud voice takes its tune from it. Blocks; any
+    number of threads may call it."""
     if not any(char.isalnum() for char in text):
         return _wav(bytes(2 * RATE // 10), RATE)  # nothing to say: a tenth of a second of quiet
     text = _PRONOUNCED.sub(lambda found: SAY_AS[found[0].rstrip(".")], text)
-    if engine() == "kokoro":
+    if engine() == "elevenlabs":
+        try:
+            return eleven.synthesize(text, previous)
+        except eleven.Unavailable as exc:
+            log.warning("the ElevenLabs voice could not speak (%s); using the voice on this Mac", exc)
+    if local_engine() == "kokoro":
         try:
             return _kokoro_wav(text)
         except Exception as exc:

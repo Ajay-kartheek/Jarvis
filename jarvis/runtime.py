@@ -327,6 +327,8 @@ class Runtime:
         self._ids = 0
         self._speech: dict[tuple[str, int], tuple[float, asyncio.Task]] = {}
         self._hushed: set[str] = set()  # speeches the user cut short: nothing more of them is made
+        self._said: dict[str, str] = {}  # what each speech has said so far, for the tune of its next sentence
+        self._voice_credits: dict | None = None
         self._speaking_turn: str | None = None  # the reply being written and spoken as it comes
         self._spoke_at = 0.0  # when the user last spoke to Jarvis, and when Jarvis last made a sound
         self._sounded_at = 0.0
@@ -376,6 +378,8 @@ class Runtime:
             "voice": {
                 "hear": self.autopilot.app_connected and self.autopilot.permissions.get("microphone") == "granted",
                 "speak": _speak_engine() is not None,
+                "engine": _speak_engine(),
+                "credits": self._voice_credits,  # the cloud voice's credits this month, read now and then
             },
             "ear": {"on": self.ear.state != "off", "awake": self.ear.state == "awake"},
         }
@@ -562,12 +566,40 @@ class Runtime:
         now = time.monotonic()
         for key in [key for key, (made, _) in self._speech.items() if now - made > SPEECH_KEPT_SECONDS]:
             del self._speech[key]
-        self._speech[(speech_id, seq)] = (now, asyncio.create_task(asyncio.to_thread(speak.synthesize, text)))
+            self._said.pop(key[0], None)
+        before = self._said.get(speech_id, "")  # the cloud voice carries the tune on from what came just before
+        self._said[speech_id] = f"{before} {text}".strip()[-1000:]
+        making = asyncio.create_task(asyncio.to_thread(speak.synthesize, text, before))
+        making.add_done_callback(lambda _: self._voice_checked())
+        self._speech[(speech_id, seq)] = (now, making)
         self._sounded_at = now
         self.hub.publish({
             "type": "speech", "id": speech_id, "seq": seq, "text": text, "url": f"/api/speech/{speech_id}/{seq}",
         })
         return True
+
+    async def _read_voice_credits(self) -> None:
+        """What is left of the cloud voice's credits, for the dashboard (ElevenLabs is asked every few minutes)."""
+        from jarvis import eleven
+
+        if not eleven.configured():
+            return
+        reading = await asyncio.to_thread(eleven.credits)
+        if reading and reading != self._voice_credits:
+            self._voice_credits = reading
+            self.publish_state()
+
+    def _voice_checked(self) -> None:
+        """After a sentence was made: say on the panel when the cloud voice could not speak, and stop saying it once
+        it can again. Not a reason to bring the panel forward."""
+        from jarvis import eleven
+
+        why = eleven.trouble()
+        if why and self.notices.get("voice") is None:
+            self.notices["voice"] = f"Jarvis is speaking with the voice on this Mac for now: {why}."
+            self.publish_state()
+        elif not why and "voice" in self.notices:
+            self.clear("voice")
 
     async def speech_audio(self, speech_id: str, seq: int) -> bytes | None:
         entry = self._speech.get((speech_id, seq))
@@ -959,6 +991,7 @@ class Runtime:
                 self.auto_prepare()
                 self.remind_due()
                 self.release_proposals()
+                await self._read_voice_credits()
                 if speech.unload_if_idle(RECOGNISER_IDLE_SECONDS):
                     log.info("speech model released")
                 if self._sounded_at and time.monotonic() - self._sounded_at > MODEL_IDLE_SECONDS:

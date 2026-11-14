@@ -120,7 +120,14 @@ export interface AppState {
   conversation: Line[]; // oldest first
   settings: Settings;
   /** What this Mac can do: hear the user, and speak. */
-  voice: { hear: boolean; speak: boolean };
+  voice: {
+    hear: boolean;
+    speak: boolean;
+    /** Who speaks: "elevenlabs" (the cloud voice), "kokoro" or "system" (on this Mac). Absent on an older service. */
+    engine?: string | null;
+    /** The cloud voice's credits this month (`resets`: Unix seconds), when known. */
+    credits?: { used: number; limit: number; resets: number } | null;
+  };
   /** What waits for the user's yes, oldest first. A question is open exactly as long as it is listed here. */
   approvals: Approval[];
   /** Listening for "Hey Jarvis": `on` while the microphone is open for it, `awake` once it heard its name. */

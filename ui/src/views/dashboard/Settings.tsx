@@ -2,7 +2,7 @@
 // small orb belongs to the panel alone and is kept on this Mac by the page (see mini.ts).
 
 import { useState } from "react";
-import type { Settings as SettingsShape } from "../../api";
+import type { AppState, Settings as SettingsShape } from "../../api";
 import { SIZED } from "../../bridge";
 import { Switch } from "../../components/Switch";
 import { useSmallOrbSetting } from "../../mini";
@@ -42,6 +42,18 @@ const SWITCHES: { key: keyof SettingsShape; label: string; about: string }[] = [
       "or someone needs an answer today. A few times a day at most, and never during a call.",
   },
 ];
+
+function speaking(voice: AppState["voice"]): string {
+  if (!voice.speak) return "Not available";
+  if (voice.engine === "elevenlabs") return "ElevenLabs, George";
+  return voice.engine ? "With the voice on this Mac" : "Available";
+}
+
+function credits({ used, limit, resets }: { used: number; limit: number; resets: number }): string {
+  const left = Math.max(0, limit - used).toLocaleString();
+  const renews = resets ? `, renewing ${new Date(resets * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" })}` : "";
+  return `${left} of ${limit.toLocaleString()} left this month${renews}`;
+}
 
 export function Settings({ jarvis }: { jarvis: Jarvis }) {
   const { app } = jarvis.model;
@@ -86,8 +98,14 @@ export function Settings({ jarvis }: { jarvis: Jarvis }) {
           </div>
           <div>
             <dt>Speaking</dt>
-            <dd data-ok={app.voice.speak || undefined}>{app.voice.speak ? "Available" : "Not available"}</dd>
+            <dd data-ok={app.voice.speak || undefined}>{speaking(app.voice)}</dd>
           </div>
+          {app.voice.credits && app.voice.credits.limit > 0 && (
+            <div>
+              <dt>Voice credits</dt>
+              <dd>{credits(app.voice.credits)}</dd>
+            </div>
+          )}
         </dl>
       </Panel>
 
