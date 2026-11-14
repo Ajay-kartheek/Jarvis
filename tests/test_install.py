@@ -5,11 +5,14 @@ from types import SimpleNamespace
 from jarvis import install
 
 
-def _launchd(loaded: bool, running: set[int], steps: list[str]):
+def _launchd(loaded: bool, running: set[int], steps: list[str], launchds: int | None = None):
     def run(command, *, check=True, cwd=None):
         if command[0] == "pgrep":
             assert command[1:] == ["-x", "-f", str(install.installed_app() / "Contents" / "MacOS" / "Jarvis")]
             return SimpleNamespace(returncode=0 if running else 1, stdout="".join(f"{pid}\n" for pid in running), stderr="")
+        if command[:2] == ["launchctl", "print"]:
+            listing = f"\tstate = running\n\tpid = {launchds}\n" if loaded and launchds in running else ""
+            return SimpleNamespace(returncode=0 if loaded else 113, stdout=listing, stderr="")
         steps.append(" ".join(command[:2]))
         return SimpleNamespace(returncode=0 if loaded else 113, stdout="", stderr="")
 
@@ -30,7 +33,7 @@ def test_stop_quits_a_copy_opened_by_hand_after_a_quit(monkeypatch):
     monkeypatch.setattr(install, "_run", _launchd(False, running, steps))
     monkeypatch.setattr(install.os, "kill", _quit(running, steps))
     install.stop(progress=said.append)
-    assert steps == ["launchctl print", "quit 4242"]
+    assert steps == ["quit 4242"]
     assert said == ["Stopped the Jarvis that was opened by hand."]
 
 
@@ -49,4 +52,13 @@ def test_restart_quits_a_copy_opened_by_hand_before_launchd_starts_the_new_one(m
     monkeypatch.setattr(install, "_run", _launchd(True, running, steps))
     monkeypatch.setattr(install.os, "kill", _quit(running, steps))
     install.restart(progress=lambda line: None)
-    assert steps == ["launchctl print", "quit 4242", "launchctl kickstart"]
+    assert steps == ["quit 4242", "launchctl kickstart"]
+
+
+def test_restart_leaves_the_copy_launchd_runs_to_launchd(monkeypatch):
+    running, steps, said = {5151}, [], []
+    monkeypatch.setattr(install, "_run", _launchd(True, running, steps, launchds=5151))
+    monkeypatch.setattr(install.os, "kill", _quit(running, steps))
+    install.restart(progress=said.append)
+    assert steps == ["launchctl kickstart"]  # kickstart -k restarts it; nobody else may quit it first
+    assert said == ["Restarted Jarvis."]

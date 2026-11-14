@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import re
 import shutil
 import signal
 import subprocess
@@ -134,12 +135,20 @@ def stop(progress: Progress = print) -> None:
     _stop_opened_by_hand(progress)
 
 
+def _launchd_pid() -> int | None:
+    """The process launchd runs for Jarvis, if it runs one."""
+    found = _run(["launchctl", "print", f"{_domain()}/{LABEL}"], check=False)
+    match = re.search(r"^\s*pid = (\d+)", found.stdout or "", re.MULTILINE)
+    return int(match.group(1)) if match else None
+
+
 def _opened_by_hand() -> list[int]:
     """Copies of the installed app that launchd did not start: opened from Finder after a Quit, say. launchd cannot
     stop them, and one left running keeps the old version going and turns the new one away (the app's lock)."""
     program = str(installed_app() / "Contents" / "MacOS" / "Jarvis")
     found = _run(["pgrep", "-x", "-f", program], check=False)  # exactly the app: not its capture helper
-    return [int(pid) for pid in found.stdout.split() if pid.isdigit()]
+    launchds = _launchd_pid()
+    return [int(pid) for pid in found.stdout.split() if pid.isdigit() and int(pid) != launchds]
 
 
 def _stop_opened_by_hand(progress: Progress) -> None:
