@@ -203,7 +203,10 @@ def load_credentials(email: str, *, refresh: bool = True) -> Credentials | None:
     raw = keychain.load_secret(keychain.GOOGLE_SERVICE, normalise_email(email))
     if raw is None:
         return None
-    creds = Credentials.from_authorized_user_info(json.loads(raw), list(SCOPES))
+    info = json.loads(raw)
+    # Refreshed with the permissions this sign-in was given: asking for more (one added since) would be refused, and
+    # the sign-in would stop working until the user signed in again.
+    creds = Credentials.from_authorized_user_info(info, info.get("scopes") or list(SCOPES))
     if refresh and not creds.valid:
         creds.refresh(Request())
         save_credentials(email, creds)
