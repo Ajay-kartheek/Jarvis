@@ -1,5 +1,5 @@
 import { motion } from "motion/react";
-import { CloseIcon, DashboardIcon } from "./icons";
+import { CloseIcon, DashboardIcon, SmallIcon } from "./icons";
 import { Switch } from "./Switch";
 
 export interface StatusWord {
@@ -13,12 +13,14 @@ interface Props {
   auto: boolean;
   onAuto: (on: boolean) => void;
   onDashboard: () => void;
+  /** Only where the panel can shrink to the small orb. */
+  onSmall?: () => void;
   /** Only inside the app, where there is a panel to put away. */
   onClose?: () => void;
 }
 
-/** The panel's top line: the name, one word for what is going on, and three controls. */
-export function Header({ status, auto, onAuto, onDashboard, onClose }: Props) {
+/** The panel's top line: the name, one word for what is going on, and the controls. */
+export function Header({ status, auto, onAuto, onDashboard, onSmall, onClose }: Props) {
   return (
     <header className="bar">
       <span className="brand">Jarvis</span>
@@ -45,6 +47,16 @@ export function Header({ status, auto, onAuto, onDashboard, onClose }: Props) {
               : "Automatic listening is off. Click to turn it on."
           }
         />
+        {onSmall && (
+          <button
+            className="icon"
+            onClick={onSmall}
+            title="Make small. Click the small orb to open Jarvis again."
+            aria-label="Make small"
+          >
+            <SmallIcon />
+          </button>
+        )}
         {onClose && (
           <button
             className="icon"

@@ -10,9 +10,11 @@ import WebKit
 
 /// The web view of a page. With `dragsWindow` on (the panel in its small form, which has no title
 /// strip) a press on the page that then moves drags the window; a press that does not move is
-/// an ordinary click, passed to the page whole, so the page still gets it.
+/// an ordinary click, passed to the page whole, so the page still gets it. `dragZone` does the
+/// same for presses within that many points of the top only (the full panel's header).
 final class PageWebView: WKWebView {
   var dragsWindow = false
+  var dragZone: CGFloat = 0
   /// The mouse moving this far (in points) makes a press into a drag.
   static let dragThreshold: CGFloat = 4
   /// Test copy only: where a drag event is on the screen, when the mouse itself is not moving.
@@ -23,7 +25,7 @@ final class PageWebView: WKWebView {
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
   override func mouseDown(with event: NSEvent) {
-    guard dragsWindow, let window else {
+    guard let window, dragsWindow || inDragZone(event) else {
       super.mouseDown(with: event)
       return
     }
@@ -58,6 +60,12 @@ final class PageWebView: WKWebView {
       super.mouseDown(with: event)
       if let released { super.mouseUp(with: released) }
     }
+  }
+
+  private func inDragZone(_ event: NSEvent) -> Bool {
+    guard dragZone > 0 else { return false }
+    let point = convert(event.locationInWindow, from: nil)
+    return (isFlipped ? point.y : bounds.height - point.y) < dragZone
   }
 }
 

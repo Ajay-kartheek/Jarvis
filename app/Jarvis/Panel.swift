@@ -39,6 +39,9 @@ final class PanelController: NSObject {
     .nonactivatingPanel, .titled, .fullSizeContentView, .resizable,
   ]
   private static let miniStyle: NSWindow.StyleMask = [.nonactivatingPanel]
+  /// Below the title strip, the page's header (the name, the status and the buttons) moves the
+  /// full panel too: this tall.
+  static let headerHeight: CGFloat = 48
 
   /// What the page asked the app to do (see PageView.onAction).
   var onAction: ((_ action: String, _ message: [String: Any]) -> Void)?
@@ -113,6 +116,7 @@ final class PanelController: NSObject {
     // The strip at the top belongs to the window (it is where the panel is
     // dragged), so the page is told how tall it is and keeps clear of it.
     page.mark(titleStrip: titleStripHeight)
+    page.webView.dragZone = dragZoneHeight
     page.onAction = { [weak self] action, message in self?.onAction?(action, message) }
     page.onLost = { [weak self] in self?.placeholder.isHidden = false }
     page.onLoaded = { [weak self] title in
@@ -183,6 +187,11 @@ final class PanelController: NSObject {
     Int((panel.frame.height - panel.contentLayoutRect.height).rounded())
   }
 
+  /// How far down from the top a press that moves drags the full panel: the strip and the header.
+  private var dragZoneHeight: CGFloat {
+    size == .full ? CGFloat(titleStripHeight) + PanelController.headerHeight : 0
+  }
+
   private var currentFrameName: String {
     size == .full ? PanelController.fullFrameName : PanelController.miniFrameName
   }
@@ -248,6 +257,7 @@ final class PanelController: NSObject {
     panel.invalidateShadow()
     // Not while the frame is on its way: a drag and the animation would pull against each other.
     page.webView.dragsWindow = false
+    page.webView.dragZone = 0
     page.mark(titleStrip: titleStripHeight, mini: wanted == .mini)
 
     var target =
@@ -265,6 +275,7 @@ final class PanelController: NSObject {
         self.panel.minSize = PanelController.minimumSize
       }
       self.page.webView.dragsWindow = wanted == .mini
+      self.page.webView.dragZone = self.dragZoneHeight
       // From here on AppKit keeps the new form's frame again (and saves this one now).
       self.panel.setFrameAutosaveName(self.currentFrameName)
       let took = Int((DispatchTime.now().uptimeNanoseconds &- began.uptimeNanoseconds) / 1_000_000)

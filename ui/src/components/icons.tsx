@@ -28,6 +28,12 @@ export const DashboardIcon = () => (
   </Icon>
 );
 
+export const SmallIcon = () => (
+  <Icon>
+    <path d="M3.5 11.5h9" />
+  </Icon>
+);
+
 export const CloseIcon = () => (
   <Icon>
     <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" />

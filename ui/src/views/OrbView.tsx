@@ -9,7 +9,7 @@ import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { isRunning } from "../api";
 import { useVoice } from "../audio";
-import { IN_APP, native, openDashboard } from "../bridge";
+import { IN_APP, SIZED, native, openDashboard } from "../bridge";
 import { parseTime } from "../format";
 import { readingEnds, useSmallOrb } from "../mini";
 import { Answer, latestExchange } from "../components/Answer";
@@ -73,7 +73,7 @@ export default function OrbView({ jarvis }: { jarvis: Jarvis }) {
 
   // The small orb. The panel stays whole while any of this is on screen, and opens for anything new to read.
   const last = app.conversation.length ? app.conversation[app.conversation.length - 1] : null;
-  const { mini, open, pointer } = useSmallOrb({
+  const { mini, open, shrink, pointer } = useSmallOrb({
     busy:
       inCall || asking || waiting.length > 0 || unanswered || pending !== null || app.busy ||
       model.hearing.phase !== "off" || app.ear.awake || voice.speaking,
@@ -192,6 +192,7 @@ export default function OrbView({ jarvis }: { jarvis: Jarvis }) {
         auto={app.settings.auto}
         onAuto={(on) => void jarvis.saveSettings({ auto: on })}
         onDashboard={openDashboard}
+        onSmall={SIZED ? shrink : undefined}
         onClose={IN_APP ? () => native("hide") : undefined}
       />
 

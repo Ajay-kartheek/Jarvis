@@ -90,6 +90,8 @@ interface SmallOrb {
   mini: boolean;
   /** Asks for the whole panel. */
   open: () => void;
+  /** The user asks for the small orb: it stays small, whatever is on screen, until something new comes. */
+  shrink: () => void;
   /** For the app to say that the pointer came onto the panel or left it. */
   pointer: (inside: boolean) => void;
 }
@@ -106,12 +108,20 @@ export function useSmallOrb({ busy, things, readUntil }: Watch): SmallOrb {
   const newest = useRef(0); // when something new to read last arrived
   const known = useRef<Set<string> | null>(null);
   const opening = useRef(0); // when the whole panel was last asked for
+  const chosen = useRef(false); // the user made it small
 
   /** Asks for the whole panel, once: several reasons to open often arrive in the same moment. */
   const open = useCallback(() => {
     if (!isMini() || performance.now() - opening.current < REASK_MS) return;
     opening.current = performance.now();
     resize("full");
+  }, []);
+
+  const shrink = useCallback(() => {
+    if (!SIZED || isMini()) return;
+    chosen.current = true;
+    asked.current = Date.now();
+    resize("mini");
   }, []);
 
   /** Starts the count again. Whatever happens on the panel calls this. */
@@ -146,9 +156,14 @@ export function useSmallOrb({ busy, things, readUntil }: Watch): SmallOrb {
   }, [names, arm, open]);
 
   useEffect(() => {
-    if (!mini) return arm(); // whole again: the count starts from here
-    // It became small just as something arrived, or while it may not be small at all.
-    if (now.current.busy || newest.current > asked.current || !allowed()) return open();
+    if (!mini) {
+      chosen.current = false;
+      return arm(); // whole again: the count starts from here
+    }
+    // It became small just as something arrived, or while it may not be small at all (unless the user said so).
+    if (newest.current > asked.current) return open();
+    if (chosen.current) return;
+    if (now.current.busy || !allowed()) return open();
     // The switch lives in the dashboard's window, and its change does not always reach this one as an event.
     const check = setInterval(() => !allowed() && open(), RECHECK_MS);
     return () => clearInterval(check);
@@ -202,5 +217,5 @@ export function useSmallOrb({ busy, things, readUntil }: Watch): SmallOrb {
     };
   }, [arm, pointer]);
 
-  return { mini, open, pointer };
+  return { mini, open, shrink, pointer };
 }
