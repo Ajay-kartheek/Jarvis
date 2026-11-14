@@ -168,6 +168,11 @@ final class PageView: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMess
     webView.evaluateJavaScript("\(script); null") { _, _ in }
   }
 
+  /// Runs an expression in the page and says whether it came out true (false when it could not run).
+  func ask(_ script: String, _ done: @escaping (Bool) -> Void) {
+    webView.evaluateJavaScript(script) { result, _ in done((result as? Bool) ?? false) }
+  }
+
   /// The daemon is not answering yet (or went away): try again in a second.
   private func loadAgainSoon(_ why: String) {
     if loaded { Log.write("\(name) lost its page (\(why))") }

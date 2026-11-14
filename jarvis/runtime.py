@@ -309,7 +309,7 @@ class Runtime:
         self.tasks = Tasks(self)
         self.approvals = Approvals(self)
         self.core = Core(config, self)
-        self.ear = Ear(self.hub.publish, self._heard_by_ear, on_listening=self.warm_voice, vocabulary=self._vocabulary)
+        self.ear = Ear(self.hub.publish, self._heard_by_ear, on_listening=self.heard_starting, vocabulary=self._vocabulary)
         self.attention = 0
         self.notices: dict[str, str] = {}
         self.cards: list[dict] = []  # newest first
@@ -326,6 +326,8 @@ class Runtime:
         self._purged_on = ""
         self._ids = 0
         self._speech: dict[tuple[str, int], tuple[float, asyncio.Task]] = {}
+        self._hushed: set[str] = set()  # speeches the user cut short: nothing more of them is made
+        self._speaking_turn: str | None = None  # the reply being written and spoken as it comes
         self._spoke_at = 0.0  # when the user last spoke to Jarvis, and when Jarvis last made a sound
         self._sounded_at = 0.0
         self._folders_due = False
@@ -523,6 +525,24 @@ class Runtime:
             and _speak_engine() is not None
         )
 
+    def hush(self) -> None:
+        """The user cut Jarvis short: whatever he was saying stops, and nothing more of it is made, the rest of a
+        reply that is still being written included. (The page stops the sound it is playing.)"""
+        cut = {speech_id for speech_id, _ in self._speech}
+        if self._speaking_turn:
+            cut.add(self._speaking_turn)
+        self._hushed |= cut
+        for (speech_id, _), (_, making) in self._speech.items():
+            if speech_id in cut and not making.done():
+                making.cancel()
+        if len(self._hushed) > 200:
+            self._hushed = cut
+
+    def heard_starting(self) -> None:
+        """The user began a spoken message, by the key or by Jarvis's name: he stops talking and gets ready."""
+        self.hush()
+        self.warm_voice()
+
     def warm_voice(self) -> None:
         """The user has started talking: get the conversation and the speaking voice ready while they do."""
         self.spawn(self.core.warm())
@@ -537,7 +557,7 @@ class Runtime:
         from jarvis import speak
 
         text = speak.speakable(sentence)
-        if not text:
+        if not text or speech_id in self._hushed:
             return False
         now = time.monotonic()
         for key in [key for key, (made, _) in self._speech.items() if now - made > SPEECH_KEPT_SECONDS]:
@@ -551,7 +571,14 @@ class Runtime:
 
     async def speech_audio(self, speech_id: str, seq: int) -> bytes | None:
         entry = self._speech.get((speech_id, seq))
-        return await entry[1] if entry else None
+        if entry is None:
+            return None
+        try:
+            return await asyncio.shield(entry[1])
+        except asyncio.CancelledError:
+            if entry[1].cancelled():  # cut short by the user, not this request going away
+                return None
+            raise
 
     def say(self, text: str, *, aloud: bool = False) -> None:
         """Jarvis speaking up by himself: a task's questions, or that something is ready.
@@ -580,6 +607,7 @@ class Runtime:
         started = time.monotonic()
         if spoken:
             self._spoke_at = started
+        self.hush()  # the user has something new to say: whatever Jarvis was saying stops
         aloud = spoken and self._may_speak()
         speaker = _Speaker(self, turn_id) if aloud else None
         at = now_iso()
@@ -601,21 +629,28 @@ class Runtime:
             if speaker:
                 speaker.feed(so_far)
 
+        # An answer still being written to an earlier message is cut short: this one comes first.
+        await self.core.interrupt()
         working = self.spawn(self._show_busy())
+        self._speaking_turn = turn_id if speaker else None
         try:
-            answer = await self.core.talk(
-                text, spoken=spoken, on_text=on_text,
-                on_step=lambda step: self.hub.publish({"type": "step", "id": turn_id, "text": step[:160]}),
-            )
-        except AgentError as exc:
-            self.hub.publish({"type": "reply_error", "id": turn_id, "text": str(exc)})
-            raise
+            try:
+                answer = await self.core.talk(
+                    text, spoken=spoken, on_text=on_text,
+                    on_step=lambda step: self.hub.publish({"type": "step", "id": turn_id, "text": step[:160]}),
+                )
+            except AgentError as exc:
+                self.hub.publish({"type": "reply_error", "id": turn_id, "text": str(exc)})
+                raise
+            finally:
+                if working is not None:
+                    working.cancel()
+                self.publish_state()
+            if speaker:
+                speaker.finish(answer.text)
         finally:
-            if working is not None:
-                working.cancel()
-            self.publish_state()
-        if speaker:
-            speaker.finish(answer.text)
+            if self._speaking_turn == turn_id:
+                self._speaking_turn = None
         reply = {
             "id": turn_id, "text": answer.text, "speak": aloud,
             "seconds": round(time.monotonic() - started, 1), "at": now_iso(),

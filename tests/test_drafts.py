@@ -93,7 +93,28 @@ def test_an_empty_draft_is_refused_before_any_network_call():
 def test_only_the_users_words_open_the_draft_tool():
     assert core.wants_draft("Draft a reply to Ravi saying Wednesday works")
     assert core.wants_draft("write to Priya about the checklist")
+    assert core.wants_draft("Yes, drafted.")
+    assert core.wants_draft("Can you send this to Ravi?")  # sending a mail needs a draft first
     assert not core.wants_draft("When is the rehearsal?")
+
+
+def test_a_request_to_draft_holds_for_the_answers_that_follow_it(talking):
+    # Jarvis asks what the mail should say; the answers do not repeat the request.
+    talking._hear("Can you draft me a mail to Ravi?", now=1000.0)
+    talking._hear("Not that Ravi, the one at example.com.", now=1010.0)
+    talking._hear("Just say hi, testing with my assistant.", now=1020.0)
+    assert talking._may_draft and not talking._may_send
+    talking._hear("What's on tomorrow?", now=1020.0 + core.ASKED_SECONDS)
+    assert not talking._may_draft
+
+
+def test_a_request_to_send_holds_for_a_few_messages_only(talking):
+    talking._hear("Can you send out a mail to Ravi?", now=1000.0)
+    for second, words in enumerate(["Hi, this is a test, with the subject Testing.", "Yes.", "Fine."], start=1):
+        talking._hear(words, now=1000.0 + second)
+        assert talking._may_draft and talking._may_send
+    talking._hear("When is the rehearsal?", now=1005.0)
+    assert not talking._may_draft and not talking._may_send
 
 
 def test_each_message_carries_the_time_and_how_it_arrived():

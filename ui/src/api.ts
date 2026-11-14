@@ -305,6 +305,8 @@ export interface Api {
   settleApproval(id: string, approve: boolean, scope?: "task"): Promise<unknown>;
   /** Tells the service that speech `id` started or stopped sounding. Nothing comes back, and a failure is nobody's business. */
   voicePlaying(id: string, playing: boolean): void;
+  /** The user cut Jarvis short: the service makes no more of what he was saying. Nothing comes back. */
+  hush(): void;
   saveSettings(change: Partial<Settings>): Promise<unknown>;
   reconnect(): Promise<unknown>;
   syncNow(): Promise<unknown>;
@@ -374,6 +376,9 @@ export const rest: Api = {
   settleApproval: (id, approve, scope) => call("POST", `/api/approvals/${seg(id)}`, scope ? { approve, scope } : { approve }),
   voicePlaying: (id, playing) => {
     void call("POST", "/api/voice/playing", { id, playing }).catch(() => undefined);
+  },
+  hush: () => {
+    void call("POST", "/api/voice/stop").catch(() => undefined);
   },
   saveSettings: (change) => call("POST", "/api/settings", change),
   reconnect: () => call("POST", "/api/reconnect"),

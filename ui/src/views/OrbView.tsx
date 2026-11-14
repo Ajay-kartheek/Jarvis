@@ -174,16 +174,19 @@ export default function OrbView({ jarvis }: { jarvis: Jarvis }) {
   const lines = inCall ? app.conversation.filter((line) => parseTime(line.at) >= began) : app.conversation;
   const earlier = exchange ? lines.slice(0, lines.length - exchange.covers) : lines;
   const offer = app.call.active && app.status === "idle" && app.meeting === null;
-  // The small orb is one button: a click, or Enter, brings the panel back.
+  // The small orb is one button: a click, or Enter, brings the panel back. While Jarvis speaks, a click on the orb in
+  // either form stops him instead.
   const opener = mini
     ? {
         role: "button",
         tabIndex: 0,
-        title: "Open Jarvis",
-        onClick: open,
+        title: voice.speaking ? "Stop talking" : "Open Jarvis",
+        onClick: () => (voice.speaking ? jarvis.hush() : open()),
         onKeyDown: (event: KeyboardEvent) => (event.key === "Enter" || event.key === " ") && open(),
       }
-    : {};
+    : voice.speaking
+      ? { title: "Stop talking", onClick: () => jarvis.hush() }
+      : {};
 
   return (
     <div className="orb-view" data-mode={mode} data-booting={booting || undefined} data-asking={asking || undefined}>
@@ -193,7 +196,14 @@ export default function OrbView({ jarvis }: { jarvis: Jarvis }) {
         onAuto={(on) => void jarvis.saveSettings({ auto: on })}
         onDashboard={openDashboard}
         onSmall={SIZED ? shrink : undefined}
-        onClose={IN_APP ? () => native("hide") : undefined}
+        onClose={
+          IN_APP
+            ? () => {
+                jarvis.hush(); // put away means quiet too
+                native("hide");
+              }
+            : undefined
+        }
       />
 
       <Notices notices={app.notices} onReconnect={jarvis.reconnect} />
@@ -219,6 +229,18 @@ export default function OrbView({ jarvis }: { jarvis: Jarvis }) {
         {/* The small orb has no header to say that the service is gone, so the orb says it. */}
         <OrbStage state={orb} compact={inCall && !mini} label={mini && link === "offline" ? "Offline" : undefined} />
         {inCall && <CallBar app={app} onSuggest={() => void suggest()} onStop={jarvis.stop} />}
+        {voice.speaking && !mini && !inCall && (
+          <button
+            className="btn ghost small hush"
+            data-augmented-ui="tl-clip br-clip border"
+            onClick={(event) => {
+              event.stopPropagation();
+              jarvis.hush();
+            }}
+          >
+            Stop
+          </button>
+        )}
       </div>
       {/* While a yes is asked for, the card says how to give it, and the line only shows words being heard. */}
       {!inCall && !(asking && live.kind === "hint") && <LiveLine live={live} />}

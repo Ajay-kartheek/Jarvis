@@ -57,6 +57,10 @@ let waking = false; // it was told to open and has not answered yet
 let idle = 0;
 const waiters = new Set<() => void>(); // what runs once the output is open
 let session: Session | null = null;
+// Speeches that were cut short. What still arrives of one is not played: the service may be part way through making
+// it, and the user did not stop one sentence but all of it.
+const hushed = new Set<string>();
+const HUSHED_KEPT = 50;
 let view: Voice = SILENT;
 let linger = 0;
 let skip = 0;
@@ -297,6 +301,7 @@ function pump(): void {
 /** Takes one sentence of audio. A different id from the one playing replaces it. */
 export function enqueue(msg: SpeechMessage): void {
   if (typeof AudioContext === "undefined") return; // no sound on this machine; the text is still shown
+  if (hushed.has(msg.id)) return;
   if (session?.id !== msg.id) {
     stop();
     session = { id: msg.id, clips: new Map(), next: msg.seq, source: null, blocked: 0 };
@@ -316,12 +321,21 @@ export function enqueue(msg: SpeechMessage): void {
     });
 }
 
-/** Stops talking and forgets what was queued: the user is speaking, or a new turn began. */
+/** Whether Jarvis is in the middle of saying something, the gaps between his sentences included. */
+export function midSpeech(): boolean {
+  return session !== null;
+}
+
+/** Stops talking and forgets what was queued, and what is still to come of it: the user is speaking, or a new turn began. */
 export function stop(): void {
   clearTimeout(skip);
   clearTimeout(linger);
   clearTimeout(acting);
   const source = session?.source;
+  if (session) {
+    hushed.add(session.id);
+    if (hushed.size > HUSHED_KEPT) hushed.delete(hushed.values().next().value as string);
+  }
   session = null;
   if (source) {
     source.onended = null;

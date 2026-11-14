@@ -49,6 +49,9 @@
   min-height: 84px;
   transition: height 0.6s var(--ease);
 }
+.orb-view > .stage:has(.hush) { cursor: pointer; } /* a click on the orb stops him too */
+/* While Jarvis speaks: the way to stop him, at the foot of the orb. */
+.stage .hush { position: absolute; left: 50%; bottom: 2px; transform: translateX(-50%); z-index: 3; }
 .orb-view > .notices { max-height: 22dvh; overflow-y: auto; }
 .orb { position: absolute; inset: 0; }
 .orb-wings { position: absolute; inset: 0; width: 100%; height: 100%; color: var(--cyan); pointer-events: none; transition: opacity 0.4s; }
@@ -511,9 +514,11 @@ html.jarvis-mini .stage:focus-visible { outline: none; }
 html.jarvis-mini .stage:focus-visible .orb-state { color: var(--bright); }
 html.jarvis-mini .orb { inset: 9px 9px 7px; }
 html.jarvis-mini .orb-wings, html.jarvis-mini .callbar { display: none; }
-html.jarvis-mini .orb-state { font-size: 9px; letter-spacing: 0.14em; }
-html.jarvis-mini .orb-state[data-note] { color: var(--amber); }
-html.jarvis-mini body::after { display: none; } /* the scanline is as tall as this whole window */
+/* The small orb floats on the desktop by itself: no square behind it, and no word under it unless something is wrong. */
+html.jarvis-mini, html.jarvis-mini body { background: transparent; }
+html.jarvis-mini body::before, html.jarvis-mini body::after, html.jarvis-mini #root::after { display: none; }
+html.jarvis-mini .orb-state { display: none; }
+html.jarvis-mini .orb-state[data-note] { display: block; font-size: 9px; letter-spacing: 0.14em; color: var(--amber); }
 /* On the way back the window is still small for a moment: until there is room, the orb alone is shown,
    not the whole panel squeezed into a corner. (Only in the app, whose panel is never this small otherwise.) */
 @media (max-width: 300px), (max-height: 300px) {

@@ -942,7 +942,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
       if noVoiceBecause == nil { voice.release() }
     } else {
       if noVoiceBecause == nil { voice.discard() }
-      togglePanel(reason: "hotkey")
+      // A tap while Jarvis is talking stops him; otherwise it shows or hides the panel.
+      panel.interrupt { [weak self] stopped in
+        if stopped {
+          Log.write("the shortcut stopped Jarvis talking")
+        } else {
+          self?.togglePanel(reason: "hotkey")
+        }
+      }
     }
   }
 

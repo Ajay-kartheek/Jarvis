@@ -819,6 +819,7 @@ export function createDemo(send: (msg: ServerMessage) => void, scene: string | n
       return { ok: true };
     },
     voicePlaying: () => undefined, // the demo's voice is acted out, without sound
+    hush: () => undefined,
     saveSettings: async (change) => {
       const settings = { ...app.settings, ...change };
       // The ear follows its switch, except during a call, when it is closed anyway.

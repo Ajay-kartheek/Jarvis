@@ -49,6 +49,8 @@ final class PanelController: NSObject {
   private let panel: JarvisPanel
   private let page: PageView
   private let placeholder = NSTextField(labelWithString: "Starting Jarvis…")
+  // Dark glass behind the full panel. The small orb has none: it floats on the desktop by itself.
+  private let glass = NSVisualEffectView()
   private var pendingReason: String?
   private var previousApp: NSRunningApplication?
   private var keyMonitor: Any?
@@ -91,7 +93,7 @@ final class PanelController: NSObject {
     container.wantsLayer = true
     container.layer?.cornerRadius = PanelController.cornerRadius
     container.layer?.masksToBounds = true
-    let glass = NSVisualEffectView(frame: container.bounds)
+    glass.frame = container.bounds
     glass.material = .hudWindow
     glass.blendingMode = .behindWindow
     glass.state = .active
@@ -144,13 +146,22 @@ final class PanelController: NSObject {
       }
     }
 
-    // Esc hides the panel wherever the keyboard focus is inside it.
+    // Esc, wherever the keyboard focus is inside the panel, stops Jarvis talking; when he is not
+    // talking, it hides the panel.
     keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
       guard let self, event.keyCode == PanelController.escapeKey, event.window === self.panel
       else { return event }
-      self.hide()
+      self.interrupt { stopped in
+        if !stopped { self.hide() }
+      }
       return nil
     }
+  }
+
+  /// Stops Jarvis talking, if he is, and says whether he was. The page knows: it plays the voice.
+  /// (A page that is not there says no.)
+  func interrupt(_ done: @escaping (Bool) -> Void) {
+    page.ask("window.jarvisInterrupt ? window.jarvisInterrupt() === true : false", done)
   }
 
   /// The full panel has no visible title bar: the page runs up under it.
@@ -251,6 +262,8 @@ final class PanelController: NSObject {
     size = wanted
     panel.styleMask = wanted == .mini ? PanelController.miniStyle : PanelController.fullStyle
     if wanted == .full { hideTitleBar() }
+    glass.isHidden = wanted == .mini
+    panel.hasShadow = wanted == .full
     // Any size may be passed through on the way; the limits of the new form apply once there.
     panel.minSize = PanelController.miniSize
     panel.maxSize = NSSize(width: 100_000, height: 100_000)

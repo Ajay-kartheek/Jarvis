@@ -445,6 +445,23 @@ export function useJarvis(view: View) {
     [api],
   );
 
+  /** Jarvis stops talking at once: the sentence playing, and all that is still to come of what he was saying.
+   * True if he was saying something. The app calls it too (as window.jarvisInterrupt), for a tap of the shortcut or Esc. */
+  const hush = useCallback(() => {
+    const was = voice.midSpeech();
+    voice.stop();
+    if (was) api.hush();
+    return was;
+  }, [api]);
+
+  useEffect(() => {
+    const page = window as unknown as { jarvisInterrupt?: () => boolean };
+    page.jarvisInterrupt = hush;
+    return () => {
+      if (page.jarvisInterrupt === hush) delete page.jarvisInterrupt;
+    };
+  }, [hush]);
+
   /** Forget the conversation so far: the next message starts from nothing. */
   const forget = useCallback(() => {
     voice.stop();
@@ -503,6 +520,7 @@ export function useJarvis(view: View) {
     reconnect,
     syncNow,
     talk,
+    hush,
     forget,
     answer,
     stopTask,

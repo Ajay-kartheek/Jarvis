@@ -81,7 +81,7 @@ async def _hear(websocket, runtime: "Runtime") -> None:
 
     hub = runtime.hub
     hub.publish({"type": "voice", "phase": "listening"})
-    runtime.warm_voice()
+    runtime.heard_starting()  # he stops talking, and gets ready while the user speaks
     loading = asyncio.create_task(asyncio.to_thread(_ready, runtime.config))
     utterance: Utterance | None = None
     waiting: list[np.ndarray] = []  # audio that arrived before the model was ready

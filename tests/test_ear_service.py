@@ -223,7 +223,7 @@ def test_what_the_ear_takes_is_answered_like_a_spoken_message(fake_home):
         runtime.ear._on_message("And tomorrow?")
         await asyncio.sleep(0.01)
         assert not runtime._tasks  # both done, the failure included
-        assert runtime.ear._on_listening == runtime.warm_voice  # the conversation gets ready while the user speaks
+        assert runtime.ear._on_listening == runtime.heard_starting  # he stops talking and gets ready while the user speaks
         return said
 
     assert asyncio.run(scene()) == [("What time is it?", True), ("And tomorrow?", True)]

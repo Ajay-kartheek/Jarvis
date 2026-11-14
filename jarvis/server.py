@@ -152,6 +152,12 @@ def create_app(config: Config, *, background: bool = False) -> FastAPI:
         runtime.speaking(body.id, body.playing)
         return {"ok": True}
 
+    @app.post("/api/voice/stop")
+    async def voice_stop() -> dict:
+        """The user stopped Jarvis talking (Stop, a click on the orb, Esc, a tap of the shortcut)."""
+        runtime.hush()
+        return {"ok": True}
+
     @app.get("/api/reminders")
     async def get_reminders() -> list[dict]:
         with open_store() as store:
