@@ -65,7 +65,18 @@ def _ready(config) -> tuple:
 
 
 async def hear(websocket, runtime: "Runtime") -> None:
-    """Receive one utterance on ``websocket`` and pass it on as a spoken message."""
+    """Receive one utterance on ``websocket`` and pass it on as a spoken message.
+
+    Jarvis's own ear is closed meanwhile: the microphone is the held key's.
+    """
+    runtime.ear.pause("message")
+    try:
+        await _hear(websocket, runtime)
+    finally:
+        runtime.ear.resume("message")
+
+
+async def _hear(websocket, runtime: "Runtime") -> None:
     from jarvis import speech
 
     hub = runtime.hub

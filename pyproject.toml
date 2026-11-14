@@ -15,6 +15,7 @@ dependencies = [
     "mlx-audio>=0.6.5",
     "num2words>=0.5.14",
     "numpy>=2.5.4",
+    "onnxruntime>=1.31.1",
     "openpyxl>=3.1.5",
     "parakeet-mlx>=0.7.0",
     "phonemizer-fork>=3.3.2",

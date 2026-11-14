@@ -144,6 +144,7 @@ def create_app(config: Config, *, background: bool = False) -> FastAPI:
             body.call.active, body.call.app, body.headphones, body.permissions,
             titles=list(dict.fromkeys(titles)), ear_state=body.ear_state,
         )
+        runtime.update_ear()  # a call that began closes Jarvis's own ear at once
         return runtime.pulse()
 
     @app.post("/api/voice/playing")
@@ -248,6 +249,25 @@ def create_app(config: Config, *, background: bool = False) -> FastAPI:
             await websocket.close()
             return
         await voice.hear(websocket, runtime)
+
+    @app.websocket("/ws/ear")
+    async def ear_socket(websocket: WebSocket) -> None:
+        """The microphone while nothing else has it, for Jarvis's name: frames as for /ws/voice, for as long as the
+        app keeps it open. Turned away with {"error": "busy"} during a call and {"error": "unavailable"} when the
+        ear is not wanted; the app then waits a while before it tries again."""
+        if not _local_origin(websocket.headers.get("origin")):
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        refusal = runtime.ear_refusal()
+        if refusal is None:
+            await runtime.ear.serve(websocket)
+        else:
+            await websocket.send_json({"error": refusal})
+        try:
+            await websocket.close()
+        except Exception:  # the app closed it first
+            pass
 
     @app.get("/api/tasks")
     async def get_tasks() -> list[dict]:

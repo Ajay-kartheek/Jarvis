@@ -46,11 +46,15 @@ CARDS_KEPT = 12
 CONVERSATION_KEPT = 10
 SPEECH_KEPT_SECONDS = 180
 SPEAK_UP_WITHIN_SECONDS = 15 * 60  # Jarvis speaks up unasked only this long after the user last spoke to him
-MODEL_IDLE_SECONDS = 600
+MODEL_IDLE_SECONDS = 600  # the speaking voice is freed after this long unused
+# The recogniser (1.5 GB) is freed after this long unused. With the ear on, any voice nearby loads it again, and that
+# takes well under a second, started as the voice begins: the first wake after it was freed came no later than any
+# other (0.47 s after the name against 0.46 s). So it need not be kept long.
+RECOGNISER_IDLE_SECONDS = 120
 AUTO_PREP_NEAREST = 12 * 60  # prepare for meetings that start between these two, in seconds from now
 AUTO_PREP_FURTHEST = 50 * 60
 AUTO_PREP_PER_DAY = 3
-# wake_word is kept and reported here; the ear reads it.
+# wake_word: the ear listens for "Jarvis" while nothing else has the microphone.
 DEFAULT_SETTINGS = {"speak": True, "auto_prep": True, "proactive": True, "wake_word": True}
 REMINDER_LATE_SECONDS = 15 * 60
 PROPOSALS_PER_DAY = 6
@@ -141,6 +145,8 @@ class MeetingController:
         self._out = out
         self.status = "preparing"
         self._task = asyncio.create_task(self._run(project, headphones, out))
+        self._task.add_done_callback(lambda _: self.runtime.update_ear())  # the call has the microphone until then
+        self.runtime.update_ear()
         self.runtime.publish_state()
 
     async def _run(self, project: str | None, headphones: bool | None, out: Path) -> None:
@@ -293,6 +299,7 @@ class Runtime:
     def __init__(self, config: Config) -> None:
         from jarvis.approvals import Approvals
         from jarvis.core import Core
+        from jarvis.ear import Ear
         from jarvis.tasks import Tasks
 
         self.config = config
@@ -302,6 +309,7 @@ class Runtime:
         self.tasks = Tasks(self)
         self.approvals = Approvals(self)
         self.core = Core(config, self)
+        self.ear = Ear(self.hub.publish, self._heard_by_ear, on_listening=self.warm_voice, vocabulary=self._vocabulary)
         self.attention = 0
         self.notices: dict[str, str] = {}
         self.cards: list[dict] = []  # newest first
@@ -329,6 +337,7 @@ class Runtime:
         self._rebuilding: set[str] = set()
         self._dossiers_on = ""  # the day the dossiers were last checked
         self._load_settings()
+        self.update_ear()
 
     # --- what the interface sees -------------------------------------------
 
@@ -366,19 +375,71 @@ class Runtime:
                 "hear": self.autopilot.app_connected and self.autopilot.permissions.get("microphone") == "granted",
                 "speak": _speak_engine() is not None,
             },
+            "ear": {"on": self.ear.state != "off", "awake": self.ear.state == "awake"},
         }
 
     def pulse(self) -> dict:
         """The little the app needs every two seconds."""
         return {"status": self.meeting.status, "attention": self.attention, "ear": self.ear_wanted()}
 
+    # --- the ear -------------------------------------------------------------------
+
     def ear_wanted(self) -> bool:
-        """Whether the app should keep the microphone open for the wake phrase. Never during a call."""
-        return False  # switched on when the ear is wired in
+        """Whether the app should keep the microphone open for Jarvis's name: the setting is on, the ear can run,
+        the microphone is allowed, and no call is on or being listened to."""
+        from jarvis import ear
+
+        return (
+            bool(self.settings.get("wake_word")) and not self.in_call()
+            and self.autopilot.permissions.get("microphone") == "granted" and ear.available()
+        )
+
+    def ear_refusal(self) -> str | None:
+        """Why a connection to the ear is turned away now: "busy" during a call, "unavailable" when not wanted."""
+        if self.in_call():
+            return "busy"
+        return None if self.ear_wanted() else "unavailable"
+
+    def update_ear(self) -> None:
+        """Close the ear while a call is on or the setting is off, and open it again after. The app closes its end
+        too, but the microphone of a call must never reach Jarvis's own ears, however late the app's word is."""
+        self.ear.headphones = self.autopilot.headphones
+        if self.in_call():
+            self.ear.pause("call")
+        else:
+            self.ear.resume("call")
+        if self.settings.get("wake_word"):
+            self.ear.resume("setting")
+        else:
+            self.ear.pause("setting")
+
+    def _vocabulary(self) -> list[str]:
+        """The user's names and terms, which a message the ear takes is read leaning towards."""
+        from jarvis import vocabulary
+
+        with open_store() as store:
+            return vocabulary.words(store, self.config)
+
+    def _heard_by_ear(self, text: str) -> None:
+        """A message the ear took: Jarvis answers it as he would a held-key one."""
+        self.spawn(self._answer_spoken(text))
+
+    async def _answer_spoken(self, text: str) -> None:
+        from jarvis.agents import AgentError
+
+        try:
+            await self.talk(text, spoken=True)
+        except AgentError:
+            pass  # already shown as the turn's error
 
     def speaking(self, speech_id: str, playing: bool) -> None:
-        """The page says Jarvis's voice started or stopped playing."""
+        """The page says Jarvis's voice started or stopped playing. The ear must not take his voice for the user's,
+        and listens for a follow-up once it has stopped."""
         self._voice_playing = playing
+        if playing:
+            self.ear.speaking_started()
+        else:
+            self.ear.speaking_ended()
 
     def publish_state(self) -> None:
         self.hub.publish({"type": "state", **self.state()})
@@ -449,6 +510,7 @@ class Runtime:
                 else:
                     self.settings[key] = bool(value)
                 store.set_state(LOCAL_ACCOUNT, "settings", key, "1" if value else "0")
+        self.update_ear()
         self.publish_state()
         return {**self.settings, "auto": self.autopilot.enabled}
 
@@ -862,7 +924,7 @@ class Runtime:
                 self.auto_prepare()
                 self.remind_due()
                 self.release_proposals()
-                if speech.unload_if_idle(MODEL_IDLE_SECONDS):
+                if speech.unload_if_idle(RECOGNISER_IDLE_SECONDS):
                     log.info("speech model released")
                 if self._sounded_at and time.monotonic() - self._sounded_at > MODEL_IDLE_SECONDS:
                     from jarvis import speak

@@ -691,7 +691,7 @@ class Core:
                 return _text("That is not the id of a mail found by search.")
             link = doc.link or ""
             # The link is made here from the thread id, never taken from the mail's own text.
-            if not link.startswith("https://mail.google.com/"):
+            if not link.startswith("https://mail.google.com/mail/?"):
                 return _text("That mail has no Gmail link.")
             subprocess.Popen(["/usr/bin/open", link], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return _text(f"Opened \"{doc.title}\" in Gmail.")

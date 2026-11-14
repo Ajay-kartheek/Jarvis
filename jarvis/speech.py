@@ -31,6 +31,9 @@ def acquire():
 
             mx.set_cache_limit(CACHE_BYTES)
             _model = listen.load_model()
+            # Make every weight real now, in this thread: one left for later can be made real only by the thread
+            # that loaded the model, and any other thread that decoded with it (the ear's) would fail.
+            mx.eval(_model.parameters())
             # The first decode is slow; get it out of the way before anyone is waiting.
             _model.generate(get_logmel(mx.zeros(listen.SAMPLE_RATE), _model.preprocessor_config))
         _users += 1
