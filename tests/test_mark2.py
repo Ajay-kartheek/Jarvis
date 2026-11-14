@@ -199,7 +199,7 @@ def client(fake_home):
     app = create_app(load_config())
     runtime = app.state.runtime
 
-    async def reply(text, *, spoken=False, on_step=None, on_text=None):
+    async def reply(text, *, spoken=False, named=True, on_step=None, on_text=None, on_tool=None):
         if "fail" in text:
             raise AgentError("The model is not reachable.")
         if on_step:
@@ -360,14 +360,13 @@ def test_a_reply_is_spoken_sentence_by_sentence_as_it_grows():
         def __init__(self):
             self.spoken = []
 
-        def _speak(self, speech_id, seq, sentence):
+        def _speak(self, speech_id, seq, sentence, keep=False):
             self.spoken.append((seq, sentence))
             return True
 
     runtime = FakeRuntime()
-    speaker = _Speaker.__new__(_Speaker)
-    speaker._runtime, speaker._id, speaker._make = runtime, "t1", FakeStream
-    speaker._stream, speaker._previous, speaker._seq = FakeStream(), "", 0
+    speaker = _Speaker(runtime, "t1")
+    speaker._make, speaker._stream = FakeStream, FakeStream()
 
     speaker.feed("Let me check")
     speaker.feed("Let me check.")

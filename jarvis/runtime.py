@@ -25,7 +25,7 @@ from collections.abc import Callable, Coroutine
 from datetime import datetime
 from pathlib import Path
 
-from jarvis import paths
+from jarvis import manner, paths
 from jarvis import projects as project_registry
 from jarvis.config import Config
 from jarvis.store import LOCAL_ACCOUNT, open_store
@@ -40,12 +40,20 @@ DAILY_CHECK_SECONDS = 300
 BRIEF_FROM_HOUR = 6
 APP_SILENT_AFTER_SECONDS = 10
 ENGAGEMENTS_CACHE_SECONDS = 30
+PAIRS_CACHE_SECONDS = 10  # a name the user just said how to say is said that way within this long
 TEST_WAV_ENV = "JARVIS_TEST_WAV"  # replay a recording as the call, for tests
 RECOVER_NOTES_WITHIN_SECONDS = 86_400
 CARDS_KEPT = 12
 CONVERSATION_KEPT = 10
 SPEECH_KEPT_SECONDS = 180
 SPEAK_UP_WITHIN_SECONDS = 15 * 60  # Jarvis speaks up unasked only this long after the user last spoke to him
+# While a spoken request is worked on (see _Speaker): once nothing has been heard for this long, a word on what Jarvis
+# is doing, at most twice a reply. What has been said is reckoned heard at about 14 characters a second.
+PROGRESS_AFTER_SECONDS = 6.0
+PROGRESS_LINES = 2
+SPOKEN_CHARS_PER_SECOND = 14
+MIND_EVERY_SECONDS = 0.5
+LINES_AFTER_SECONDS = 90  # Jarvis's own short lines are made in the cloud voice this long after a start
 MODEL_IDLE_SECONDS = 600  # the speaking voice is freed after this long unused
 # The recogniser (1.5 GB) is freed after this long unused. With the ear on, any voice nearby loads it again, and that
 # takes well under a second, started as the voice begins: the first wake after it was freed came no later than any
@@ -330,6 +338,7 @@ class Runtime:
         self._hushed: set[str] = set()  # speeches the user cut short: nothing more of them is made
         self._said: dict[str, str] = {}  # what each speech has said so far, for the tune of its next sentence
         self._voice_credits: dict | None = None
+        self._pairs: tuple[float, dict[str, str]] = (float("-inf"), {})  # how names are said, and when it was read
         self._speaking_turn: str | None = None  # the reply being written and spoken as it comes
         self._spoke_at = 0.0  # when the user last spoke to Jarvis, and when Jarvis last made a sound
         self._sounded_at = 0.0
@@ -429,13 +438,13 @@ class Runtime:
 
     def _heard_by_ear(self, text: str) -> None:
         """A message the ear took: Jarvis answers it as he would a held-key one."""
-        self.spawn(self._answer_spoken(text))
+        self.spawn(self._answer_spoken(text, self.ear.by_name))
 
-    async def _answer_spoken(self, text: str) -> None:
+    async def _answer_spoken(self, text: str, named: bool) -> None:
         from jarvis.agents import AgentError
 
         try:
-            await self.talk(text, spoken=True)
+            await self.talk(text, spoken=True, named=named)
         except AgentError:
             pass  # already shown as the turn's error
 
@@ -564,8 +573,9 @@ class Runtime:
             self._sounded_at = time.monotonic()
             self.spawn(asyncio.to_thread(speak.warm))
 
-    def _speak(self, speech_id: str, seq: int, sentence: str) -> bool:
-        """Start turning one sentence into sound and tell the interface where to fetch it."""
+    def _speak(self, speech_id: str, seq: int, sentence: str, keep: bool = False) -> bool:
+        """Start turning one sentence into sound and tell the interface where to fetch it. ``keep``: one of Jarvis's own
+        short lines, which the voice makes once and keeps."""
         from jarvis import speak
 
         text = speak.speakable(sentence)
@@ -577,7 +587,7 @@ class Runtime:
             self._said.pop(key[0], None)
         before = self._said.get(speech_id, "")  # the cloud voice carries the tune on from what came just before
         self._said[speech_id] = f"{before} {text}".strip()[-1000:]
-        making = asyncio.create_task(asyncio.to_thread(speak.synthesize, text, before))
+        making = asyncio.create_task(asyncio.to_thread(speak.synthesize, self._respelled(text), before, keep))
         making.add_done_callback(lambda _: self._voice_checked())
         self._speech[(speech_id, seq)] = (now, making)
         self._sounded_at = now
@@ -585,6 +595,21 @@ class Runtime:
             "type": "speech", "id": speech_id, "seq": seq, "text": text, "url": f"/api/speech/{speech_id}/{seq}",
         })
         return True
+
+    def _respelled(self, text: str) -> str:
+        """``text`` with each name the user said how to say (on the dashboard's Memory page) spelt so that the voice
+        says it that way. Read from the store at most every few seconds."""
+        from jarvis import vocabulary
+
+        read_at, pairs = self._pairs
+        if time.monotonic() - read_at > PAIRS_CACHE_SECONDS:
+            try:
+                with open_store() as store:
+                    pairs = vocabulary.pronunciations(store)
+            except Exception as exc:  # the voice says the names its own way meanwhile
+                log.warning("how names are said could not be read: %s", exc)
+            self._pairs = (time.monotonic(), pairs)
+        return vocabulary.respell(text, pairs) if pairs else text
 
     async def _read_voice_credits(self) -> None:
         """What is left of the cloud voice's credits, for the dashboard (ElevenLabs is asked every few minutes)."""
@@ -639,8 +664,13 @@ class Runtime:
                 self._speak(speech_id, seq, sentence)
         self.publish_state()
 
-    async def talk(self, text: str, *, spoken: bool = False, turn_id: str | None = None) -> dict:
-        """One message from the user and Jarvis's reply. Raises AgentError if no reply could be made."""
+    async def talk(self, text: str, *, spoken: bool = False, named: bool = True, turn_id: str | None = None) -> dict:
+        """One message from the user and Jarvis's reply. Raises AgentError if no reply could be made.
+
+        ``named``: a spoken message began with Jarvis's name. One the ear took without it, in a conversation, may have
+        been meant for someone else in the room; when the model says so, Jarvis says nothing and the conversation
+        ends.
+        """
         from jarvis.agents import AgentError
 
         turn_id = turn_id or self._next_id("t")
@@ -657,35 +687,52 @@ class Runtime:
         # A plain yes or no to an open question is the user's answer to it. It never reaches a model.
         settled = self.approvals.words(text, spoken)
         if settled is not None:
-            said = "Going ahead." if settled.granted else "Cancelled."
-            reply = {"id": turn_id, "text": said, "speak": False, "seconds": 0.0, "at": now_iso()}
-            self.hub.publish({"type": "reply", **reply})
-            self.conversation.append({"role": "jarvis", "text": said, "at": reply["at"]})
-            self.publish_state()
-            return {**reply, "web_queries": [], "drafts": []}
+            return self._replied(turn_id, "Going ahead." if settled.granted else "Cancelled.")
+
+        # "That's all", "thanks", "stop": the conversation is over, and Jarvis says so at once, without a model.
+        ending = manner.ending(text) if spoken else None
+        if ending is not None:
+            await self.core.interrupt()
+            self.ear.end_conversation()
+            if speaker and ending:
+                speaker.line(ending)
+            return self._replied(turn_id, ending, speak=bool(speaker and ending))
+
+        if speaker and named and manner.needs_work(text):
+            speaker.line(manner.acknowledgement(text))  # the answer takes a while: say at once that it is coming
 
         def on_text(so_far: str) -> None:
+            if manner.maybe_not_for_me(so_far):
+                return  # held back until it is known not to be that, which is never shown or said
             self.hub.publish({"type": "reply_delta", "id": turn_id, "text": so_far})
             if speaker:
                 speaker.feed(so_far)
 
+        def on_tool(name: str) -> None:
+            if speaker:
+                speaker.tool_started(name)
+
         # An answer still being written to an earlier message is cut short: this one comes first.
         await self.core.interrupt()
         working = self.spawn(self._show_busy())
+        minding = self.spawn(speaker.mind()) if speaker else None
         self._speaking_turn = turn_id if speaker else None
         try:
             try:
                 answer = await self.core.talk(
-                    text, spoken=spoken, on_text=on_text,
+                    text, spoken=spoken, named=named, on_text=on_text, on_tool=on_tool,
                     on_step=lambda step: self.hub.publish({"type": "step", "id": turn_id, "text": step[:160]}),
                 )
             except AgentError as exc:
                 self.hub.publish({"type": "reply_error", "id": turn_id, "text": str(exc)})
                 raise
             finally:
-                if working is not None:
-                    working.cancel()
+                for task in (working, minding):
+                    if task is not None:
+                        task.cancel()
                 self.publish_state()
+            if manner.not_for_me(answer.text):
+                return self._not_for_me(turn_id, text, started)
             if speaker:
                 speaker.finish(answer.text)
         finally:
@@ -699,6 +746,29 @@ class Runtime:
         self.conversation.append({"role": "jarvis", "text": answer.text, "at": reply["at"]})
         self.publish_state()
         return {**reply, "web_queries": answer.web_queries, "drafts": answer.drafts}
+
+    def _replied(self, turn_id: str, said: str, *, speak: bool = False) -> dict:
+        """End a turn with a reply no model wrote: the answer to an open question, or the end of a conversation."""
+        reply = {"id": turn_id, "text": said, "speak": speak, "seconds": 0.0, "at": now_iso()}
+        self.hub.publish({"type": "reply", **reply})
+        if said:
+            self.conversation.append({"role": "jarvis", "text": said, "at": reply["at"]})
+        self.publish_state()
+        return {**reply, "web_queries": [], "drafts": []}
+
+    def _not_for_me(self, turn_id: str, text: str, started: float) -> dict:
+        """A message the ear took without Jarvis's name was meant for someone else: it is taken back, nothing is said,
+        and only the name starts a conversation again."""
+        self.ear.end_conversation()
+        if self.conversation and self.conversation[-1]["role"] == "user" and self.conversation[-1]["text"] == text:
+            self.conversation.pop()
+        reply = {
+            "id": turn_id, "text": "", "speak": False, "seconds": round(time.monotonic() - started, 1),
+            "at": now_iso(), "ignored": True,
+        }
+        self.hub.publish({"type": "reply", **reply})
+        self.publish_state()
+        return {**reply, "web_queries": [], "drafts": []}
 
     async def _show_busy(self) -> None:
         await asyncio.sleep(0)  # by now the conversation's lock is taken
@@ -895,6 +965,23 @@ class Runtime:
         self.spawn(self._daily_loop())
         self.spawn(self._minute_loop())
         self.spawn(self.recover_notes())
+        self.spawn(self._make_lines())
+
+    async def _make_lines(self) -> None:
+        """Have Jarvis's own short lines ready in the cloud voice, so that the first "Right, checking." is heard at once
+        too. Each is made once; the voices on this Mac make one in a moment when it is first wanted."""
+        from jarvis import speak
+
+        await asyncio.sleep(LINES_AFTER_SECONDS)
+        for text in manner.AT_ONCE:
+            if speak.engine() != "elevenlabs":
+                return
+            self._sounded_at = time.monotonic()  # should the voice on this Mac stand in, it is freed again when idle
+            try:
+                await asyncio.to_thread(speak.synthesize, text, "", True)
+            except Exception as exc:  # it is made when it is first wanted instead
+                log.warning("a spoken line could not be made ahead: %s", exc)
+                return
 
     async def shutdown(self) -> None:
         self._closing = True
@@ -1142,11 +1229,16 @@ class Runtime:
 
 
 class _Speaker:
-    """Turns a reply into spoken sentences while it is still being written.
+    """Turns a reply into spoken sentences while it is still being written, and keeps the user from waiting in silence.
 
     The reply arrives as "the whole text so far". When Jarvis says a line, uses
     a tool and then starts a new line, the text starts over; what was said
-    before the tool is finished off first.
+    before the tool is said as the tool begins, not after it.
+
+    While he works he is not silent for long. A short line of his own says he
+    has heard (``line``: "Right, checking."), or that he has begun a slow tool;
+    on a long job another says what he is doing (``mind``). The "Let me check
+    your calendar" he may then write himself is not said as well.
     """
 
     def __init__(self, runtime: Runtime, speech_id: str) -> None:
@@ -1158,18 +1250,57 @@ class _Speaker:
         self._stream = self._make()
         self._previous = ""
         self._seq = 0
+        self._lines = 0  # Jarvis's own lines said so far
+        self._sentences = 0  # ...and sentences of the reply
+        self._heard_by = time.monotonic()  # when what has been said will have been heard
+        self._tool: str | None = None  # the tool the reply is waiting for
+        self._progress = 0  # words on what he is doing, said so far
+
+    def _say(self, text: str, keep: bool = False) -> bool:
+        if not self._runtime._speak(self._id, self._seq, text, keep=keep):
+            return False
+        self._seq += 1
+        self._heard_by = max(self._heard_by, time.monotonic()) + len(text) / SPOKEN_CHARS_PER_SECOND
+        return True
 
     def _out(self, sentences: list[str]) -> None:
         for sentence in sentences:
-            if self._runtime._speak(self._id, self._seq, sentence):
-                self._seq += 1
+            if self._lines and not self._sentences and manner.is_preamble(sentence):
+                continue  # "Let me check your calendar", after "Right, checking."
+            if self._say(sentence):
+                self._sentences += 1
+
+    def line(self, text: str) -> None:
+        """Say one of Jarvis's own short lines, which the voice keeps ready."""
+        if self._say(text, keep=True):
+            self._lines += 1
 
     def feed(self, text: str) -> None:
         if self._previous and not text.startswith(self._previous[: max(1, len(self._previous) // 2)]):
             self._out(self._stream.finish(self._previous))
             self._stream = self._make()
         self._previous = text
+        self._tool = None  # writing again: the tool has answered
         self._out(self._stream.feed(text))
+
+    def tool_started(self, name: str) -> None:
+        """Jarvis begins to use a tool: what he wrote before it is said now, and if nothing has been said yet, that he
+        is on it (for a tool that takes a while)."""
+        if self._previous:
+            self._out(self._stream.finish(self._previous))
+            self._stream, self._previous = self._make(), ""
+        self._tool = name
+        if not self._lines and not self._sentences and (line := manner.starting(name)):
+            self.line(line)
+
+    async def mind(self) -> None:
+        """While the reply is worked on: once a tool has kept him quiet for a while, a word on what he is doing."""
+        while True:
+            await asyncio.sleep(MIND_EVERY_SECONDS)
+            quiet = time.monotonic() - self._heard_by >= PROGRESS_AFTER_SECONDS
+            if self._tool is not None and quiet and self._progress < PROGRESS_LINES:
+                self.line(manner.progress(self._tool, self._progress))
+                self._progress += 1
 
     def finish(self, final: str) -> None:
         self.feed(final)

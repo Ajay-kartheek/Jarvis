@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import importlib.util
 import logging
+import re
 import threading
 
 import numpy as np
@@ -120,6 +121,23 @@ class FakeVoice:
                 for window in sound[:whole].reshape(-1, ear.WINDOW)]
 
 
+class FakeFinished:
+    """Stands in for the turn model: what was said so far is finished when its last word ends a sentence."""
+
+    def __init__(self, fails: Exception | None = None) -> None:
+        self.heard: list[np.ndarray] = []  # what it was asked about
+        self.threads: set[int] = set()
+        self.fails = fails
+
+    def chance(self, samples: np.ndarray) -> float:
+        self.threads.add(threading.get_ident())
+        if self.fails:
+            raise self.fails
+        self.heard.append(samples)
+        said = spoken_values(samples)
+        return 0.9 if said and said[-1][-1] in ".?!" else 0.1
+
+
 class FakeUtterance:
     def __init__(self, model, words=()) -> None:
         assert model is MODEL
@@ -192,7 +210,10 @@ class World:
         self.broken: Exception | None = None  # the recogniser cannot be had
         self.failing: Exception | None = None  # the recogniser fails on the sound
         self.ear = ear.Ear(self._publish, self._on_message, on_listening=self._on_listening)
+        self.finished: FakeFinished | None = None  # the turn model; without it a message ends after a fixed pause
+        self.by_name: list[bool] = []  # what the ear said of each message as it was handed on
         monkeypatch.setattr(ear, "_load", self._load)
+        monkeypatch.setattr(ear, "_finished", lambda: self.finished)
         monkeypatch.setattr(ear, "_utterance", FakeUtterance)
         monkeypatch.setattr(ear, "_recognise", self._recognise)
         # The stand-in puts the end of a word where it is; the real recogniser puts the end of the name a little early,
@@ -269,6 +290,7 @@ class World:
     def _on_message(self, text: str) -> None:
         self.events.append((round(self.clock, 2), {"type": "message", "text": text}))
         self.messages.append(text)
+        self.by_name.append(self.ear.by_name)
 
     def _on_listening(self) -> None:
         self.listening += 1
@@ -545,10 +567,59 @@ def test_a_short_utterance_is_decided_when_it_ends(world):
 # --- the end of a message -----------------------------------------------------
 
 
-def test_the_message_ends_about_a_second_after_the_user_stops(world):
+def test_without_the_turn_model_the_message_ends_about_a_second_after_the_user_stops(world):
     world.play(quiet(1), call(), quiet(0.5), words("what time is it?"), quiet(3), frame=ear.FRAME)
     stopped = 1 + 0.5 + 0.5 + 1.0
     assert ear.END_SECONDS <= world.when("voice", "heard")[0] - stopped <= ear.END_SECONDS + 0.2
+
+
+def test_a_finished_message_ends_as_soon_as_the_turn_model_says_so(world):
+    world.finished = FakeFinished()
+    world.play(quiet(1), call(), quiet(0.5), words("what time is it?"), quiet(3), frame=ear.FRAME)
+    stopped = 1 + 0.5 + 0.5 + 1.0
+    assert world.messages == ["What time is it?"]
+    assert ear.ASK_SECONDS <= world.when("voice", "heard")[0] - stopped <= ear.ASK_SECONDS + 0.12
+    assert len(world.finished.heard) == 1
+
+
+def test_a_pause_in_mid_thought_does_not_end_the_message_and_the_next_pause_is_asked_about_again(world):
+    world.finished = FakeFinished()
+    thinking = (ear.END_SECONDS + ear.LONGEST_PAUSE_SECONDS) / 2  # longer than the fixed pause would allow
+    world.play(quiet(1), call(), words("remind me to"), quiet(thinking), words("call the bank."), quiet(3),
+               frame=ear.FRAME)
+    assert world.messages == ["Remind me to call the bank."]
+    assert [spoken_values(heard)[-1] for heard in world.finished.heard] == ["to", "bank."]
+
+
+def test_a_pause_that_simply_goes_on_ends_the_message_all_the_same(world):
+    world.finished = FakeFinished()
+    world.play(quiet(1), call(), quiet(0.5), words("remind me to"), quiet(4), frame=ear.FRAME)
+    stopped = 1 + 0.5 + 0.5 + 0.75
+    assert world.messages == ["Remind me to"]
+    assert ear.LONGEST_PAUSE_SECONDS <= world.when("voice", "heard")[0] - stopped <= ear.LONGEST_PAUSE_SECONDS + 0.12
+    assert len(world.finished.heard) == 1  # not asked again while nobody speaks
+
+
+def test_the_turn_model_hears_the_message_without_the_name_and_no_more_than_eight_seconds_of_it(world):
+    world.finished = FakeFinished()
+    world.play(quiet(1), words("so I told them we would ship on Friday"), quiet(0.6), call(), words("what time is it?"),
+               quiet(2), frame=ear.FRAME)
+    heard = world.finished.heard[0]  # what the recogniser was given: no more than a scrap of the name
+    assert transcript(heard) == "what time is it?" and "Hey" not in spoken_values(heard)
+    assert np.all(heard[-int(ear.ASK_SECONDS * RATE):] == np.float32(QUIET))  # ...and the quiet since
+    world.play(quiet(1), call(), words(" ".join(["again"] * 40) + " and that is all."), quiet(2), frame=ear.FRAME)
+    assert world.messages[-1].endswith("and that is all.")
+    assert len(world.finished.heard[-1]) == ear.TURN_SAMPLES and spoken_values(world.finished.heard[-1])[-1] == "all."
+
+
+def test_a_turn_model_that_fails_leaves_the_fixed_pause_to_end_the_message(world, caplog):
+    world.finished = FakeFinished(fails=RuntimeError("the turn model broke"))
+    with caplog.at_level(logging.WARNING, logger="jarvis"):
+        world.play(quiet(1), call(), quiet(0.5), words("what time is it?"), quiet(3), frame=ear.FRAME)
+    stopped = 1 + 0.5 + 0.5 + 1.0
+    assert world.messages == ["What time is it?"]
+    assert ear.END_SECONDS <= world.when("voice", "heard")[0] - stopped <= ear.END_SECONDS + 0.2
+    assert "the turn model broke" in caplog.text
 
 
 def test_a_long_pause_after_the_name_is_not_the_end(world):
@@ -839,6 +910,84 @@ def test_a_long_spoken_answer_keeps_the_ear_awake_until_it_is_over(world):
                quiet(1), words("thank you"), quiet(2))
     assert world.messages == ["Read me the brief", "Thank you"]
     assert ASLEEP not in world.told()[1:]
+
+
+# --- whether a message was meant for Jarvis, and the end of a conversation ------
+
+
+def test_each_message_says_whether_it_began_with_the_name(world):
+    world.play(quiet(1), call(), words("what time is it?"), quiet(1.5), *answered(world), quiet(1),
+               words("and tomorrow?"), quiet(1.5), *answered(world), quiet(1), words("Hey Jarvis, and the day after?"),
+               quiet(2))
+    assert world.messages == ["What time is it?", "And tomorrow?", "And the day after?"]
+    assert world.by_name == [True, False, True]  # a follow-up that begins with the name all the same
+
+
+def test_talk_over_jarvis_is_not_a_message_by_name_but_his_name_interrupting_him_is(world):
+    world.play(quiet(1), world.ear.speaking_started, left_over(1.5), words("wait what about the budget"),
+               left_over(0.5), world.ear.speaking_ended, quiet(2), echo="cancelled", frame=800)
+    world.play(quiet(1), world.ear.speaking_started, jarvis(2), quiet(0.4), call(), quiet(0.8), words("not now"),
+               quiet(2))
+    assert world.messages == ["Wait what about the budget", "Not now"] and world.by_name == [False, True]
+
+
+def test_the_end_of_a_conversation_puts_the_ear_to_sleep_and_his_closing_words_open_no_follow_up(world):
+    seen = []
+    world.play(quiet(1), call(), words("that is all for now"), quiet(1.5), world.ear.end_conversation,
+               lambda: seen.append(world.ear.state), quiet(1), world.ear.speaking_started, jarvis(1),
+               world.ear.speaking_ended, lambda: seen.append(world.ear.state), quiet(1),
+               words("and what about tomorrow?"), quiet(2))
+    assert seen == ["asleep", "asleep"]
+    assert world.messages == ["That is all for now"]
+    assert without_partials(world.told()) == [ASLEEP, AWAKE, LISTENING, *heard("That is all for now"), ASLEEP, OFF]
+
+
+def test_the_end_of_a_conversation_while_he_speaks_lets_him_finish_and_then_the_ear_sleeps(world):
+    seen = []
+    world.play(quiet(1), call(), words("thanks that is all"), quiet(1.5), quiet(1), world.ear.speaking_started,
+               jarvis(0.5), world.ear.end_conversation, lambda: seen.append(world.ear.state), jarvis(1),
+               world.ear.speaking_ended, lambda: seen.append(world.ear.state), quiet(1), words("one more thing"),
+               quiet(2))
+    assert seen == ["awake", "asleep"]
+    assert world.messages == ["Thanks that is all"]
+
+
+def test_the_end_of_a_conversation_in_the_follow_up_time_closes_it_at_once(world):
+    seen = []
+    world.play(quiet(1), call(), words("what time is it?"), quiet(1.5), *answered(world), quiet(0.5),
+               world.ear.end_conversation, lambda: seen.append(world.ear.state), quiet(1), words("and tomorrow?"),
+               quiet(2))
+    assert seen == ["asleep"] and world.messages == ["What time is it?"]
+
+
+def test_a_message_being_taken_when_the_conversation_ends_is_still_taken(world):
+    world.play(quiet(1), call(), words("what time is it?"), quiet(1.5), *answered(world), quiet(1), words("and"),
+               world.ear.end_conversation, words("tomorrow?"), quiet(1.5), *answered(world), quiet(1),
+               words("thank you"), quiet(2))
+    assert world.messages == ["What time is it?", "And tomorrow?", "Thank you"]  # a new message, a new exchange
+
+
+def test_after_the_end_of_a_conversation_the_name_starts_one_again(world):
+    world.play(quiet(1), call(), words("that is all"), quiet(1.5), world.ear.end_conversation, quiet(1),
+               world.ear.speaking_started, jarvis(1), world.ear.speaking_ended, quiet(1), call(),
+               words("what time is it?"), quiet(1.5), *answered(world), quiet(1), words("and tomorrow?"), quiet(2))
+    assert world.messages == ["That is all", "What time is it?", "And tomorrow?"]
+
+
+def test_what_he_begins_to_say_long_after_the_end_of_a_conversation_opens_the_follow_up_as_usual(world):
+    world.play(quiet(1), call(), words("that is all"), quiet(1.5), world.ear.end_conversation,
+               quiet(ear.REPLY_SECONDS + 1), world.ear.speaking_started, jarvis(1), world.ear.speaking_ended, quiet(1),
+               words("remind me again in an hour"), quiet(2))
+    assert world.messages == ["That is all", "Remind me again in an hour"]
+
+
+def test_the_time_the_end_of_a_conversation_holds_for_is_not_stretched_by_a_new_connection(world):
+    world.play(quiet(30), call(), words("that is all"), quiet(1.5), world.ear.end_conversation, quiet(1))
+    world.play(quiet(1), world.ear.speaking_started, jarvis(1), world.ear.speaking_ended, quiet(1),
+               words("and one more thing"), quiet(2))  # still his closing words
+    world.play(quiet(ear.REPLY_SECONDS), world.ear.speaking_started, jarvis(1), world.ear.speaking_ended, quiet(1),
+               words("remind me again in an hour"), quiet(2))  # counted on from where the last connection left off
+    assert world.messages == ["That is all", "Remind me again in an hour"]
 
 
 # --- Jarvis's own voice ---------------------------------------------------------
@@ -1143,16 +1292,18 @@ def test_when_the_ear_cannot_keep_up_the_oldest_sound_is_dropped(world, monkeypa
 
 def test_listening_and_recognising_happen_off_the_event_loop(world):
     loop_thread = []
+    world.finished = FakeFinished()
     world.play(lambda: loop_thread.append(threading.get_ident()), quiet(1), call(), words("what time is it?"),
                quiet(2), threads=True)
     assert world.messages == ["What time is it?"]
     assert world.voices[0].threads and loop_thread[0] not in world.voices[0].threads
     assert world.decoding and loop_thread[0] not in world.decoding
     assert world.utterances[0].threads and loop_thread[0] not in world.utterances[0].threads
+    assert world.finished.threads and loop_thread[0] not in world.finished.threads
     assert world.acquired == world.released == 1
     # one thread for all of it: the recogniser has to be used first by the thread that loaded it
     assert world.voices[0].threads == world.decoding == world.utterances[0].threads == world.acquiring
-    assert len(world.acquiring) == 1
+    assert world.finished.threads == world.acquiring and len(world.acquiring) == 1
 
 
 def test_a_whole_conversation_with_real_threads(world):
@@ -1349,7 +1500,7 @@ def test_an_utterance_begins_with_a_voice_after_a_pause():
 @pytest.fixture
 def data(tmp_path, monkeypatch):
     monkeypatch.setenv("JARVIS_DATA", str(tmp_path))
-    sessions = ear._sessions
+    sessions = ear._session
     sessions.cache_clear()
     yield tmp_path
     sessions.cache_clear()
@@ -1360,14 +1511,23 @@ def test_available_is_false_until_the_voice_model_is_there(data):
     ear.folder().mkdir(parents=True)
     assert ear.available() is False
     (ear.folder() / ear.VOICE).write_bytes(b"model")
-    assert ear.available() is True
+    assert ear.available() is True  # the turn model is not needed to listen
     assert ear.folder() == data / "models" / "ear"
+
+
+def test_without_the_turn_model_or_with_a_broken_one_messages_end_after_a_fixed_pause(data, caplog):
+    ear.folder().mkdir(parents=True)
+    assert ear._finished() is None
+    (ear.folder() / ear.TURN).write_bytes(b"not a model")
+    with caplog.at_level(logging.WARNING, logger="jarvis"):
+        assert ear._finished() is None
+    assert "turn model could not be read" in caplog.text
 
 
 def test_available_is_false_without_onnxruntime_and_loads_nothing(data, monkeypatch):
     ear.folder().mkdir(parents=True)
     (ear.folder() / ear.VOICE).write_bytes(b"model")
-    monkeypatch.setattr(ear, "_sessions", lambda: pytest.fail("available() must not load a model"))
+    monkeypatch.setattr(ear, "_session", lambda name: pytest.fail("available() must not load a model"))
     assert ear.available() is True
     real = importlib.util.find_spec
     hidden = lambda name, *rest: None if name == "onnxruntime" else real(name, *rest)  # noqa: E731
@@ -1419,7 +1579,7 @@ class Fetched:
         return Response()
 
 
-def test_download_fetches_the_voice_model_once_and_only_keeps_what_it_expected(data, monkeypatch):
+def test_download_fetches_the_models_once_and_only_keeps_what_it_expected(data, monkeypatch):
     files = {name: f"the model {name}".encode() for name in ear.FILES}
     expected = {name: (source, hashlib.sha256(files[name]).hexdigest()) for name, (source, _) in ear.FILES.items()}
     monkeypatch.setattr(ear, "FILES", expected)
@@ -1432,11 +1592,16 @@ def test_download_fetches_the_voice_model_once_and_only_keeps_what_it_expected(d
     assert ear.available() is True
 
     ear.download()
-    assert len(network.asked) == 1  # there and as expected: nothing is fetched again
+    assert len(network.asked) == len(files)  # there and as expected: nothing is fetched again
+
+    (ear.folder() / ear.TURN).write_bytes(b"damaged")
+    ear.download()
+    assert network.asked[len(files):] == [expected[ear.TURN][0] + ear.TURN]
+    del network.asked[len(files):]
 
     (ear.folder() / ear.VOICE).write_bytes(b"damaged")
     ear.download()
-    assert network.asked[1:] == [expected[ear.VOICE][0] + ear.VOICE]
+    assert network.asked[len(files):] == [expected[ear.VOICE][0] + ear.VOICE]
     assert (ear.folder() / ear.VOICE).read_bytes() == files[ear.VOICE]
 
     (ear.folder() / ear.VOICE).unlink()
@@ -1446,11 +1611,15 @@ def test_download_fetches_the_voice_model_once_and_only_keeps_what_it_expected(d
     assert not (ear.folder() / ear.VOICE).exists() and ear.available() is False
 
 
-def test_the_only_file_fetched_is_silero_voice_model_over_https_and_checked():
-    assert set(ear.FILES) == {ear.VOICE}
+def test_the_files_fetched_are_silero_voice_model_and_smart_turn_pinned_over_https_and_checked():
+    assert set(ear.FILES) == {ear.VOICE, ear.TURN}
     for source, digest in ear.FILES.values():
         assert source.startswith("https://") and source.endswith("/") and len(digest) == 64
-        assert "silero" in source and "openwakeword" not in source.lower()  # no wake-word model, whatever its terms
+        assert "openwakeword" not in source.lower()  # no wake-word model, whatever its terms
+        assert "/main/" not in source and "/master/" not in source  # a release or a commit, never what moves on
+    assert "silero" in ear.FILES[ear.VOICE][0]
+    pinned = r"https://huggingface\.co/pipecat-ai/smart-turn-v3/resolve/[0-9a-f]{40}/"  # a commit
+    assert re.fullmatch(pinned, ear.FILES[ear.TURN][0])
 
 
 # --- the voice model, fed by a stand-in for its file ------------------------------
@@ -1470,7 +1639,7 @@ class Session:
 
 def test_the_voice_model_gets_whole_windows_and_keeps_what_is_left_over(monkeypatch):
     session = Session(lambda inputs: [np.array([[0.75]], dtype=np.float32), inputs["state"] + 1])
-    monkeypatch.setattr(ear, "_sessions", lambda: {ear.VOICE: session})
+    monkeypatch.setattr(ear, "_session", lambda name: session)
     voice = ear._Voice()
     assert voice.heard(np.zeros(ear.FRAME, dtype=np.float32)) == [0.75, 0.75]  # 1280 samples: two windows and a half
     assert voice.heard(np.zeros(ear.FRAME, dtype=np.float32)) == [0.75, 0.75, 0.75]
@@ -1480,6 +1649,30 @@ def test_the_voice_model_gets_whole_windows_and_keeps_what_is_left_over(monkeypa
     assert int(given[0]["sr"]) == RATE and given[4]["state"][0, 0, 0] == 4  # the state goes from window to window
     voice.reset()
     assert voice.heard(np.zeros(ear.WINDOW, dtype=np.float32)) == [0.75] and given[5]["state"][0, 0, 0] == 0
+
+
+def test_the_turn_model_gets_whisper_features_of_eight_seconds_and_its_chance_is_read_back():
+    session = Session(lambda inputs: [np.array([[0.83]], dtype=np.float32)])
+    finished = ear._Finished(session)
+    assert finished.chance(np.full(RATE, 0.1, dtype=np.float32)) == pytest.approx(0.83)
+    given = session.given[0]["input_features"]
+    assert given.shape == (1, ear.MEL_BANDS, ear.TURN_SAMPLES // ear.MEL_STEP) and given.dtype == np.float32
+
+
+def test_the_turn_models_features_are_those_transformers_makes():
+    transformers = pytest.importorskip("transformers")
+    extractor = transformers.WhisperFeatureExtractor(chunk_length=8)
+    t = np.arange(12 * RATE) / RATE
+    tone = 0.3 * np.sin(2 * np.pi * (180 + 40 * np.sin(2 * np.pi * 3 * t)) * t) * (np.sin(2 * np.pi * 1.5 * t) > 0)
+    sound = (tone + 0.01 * np.random.default_rng(7).standard_normal(len(t))).astype(np.float32)
+    for seconds in (0.5, 3.0, 8.0, 12.0):
+        samples = sound[: int(seconds * RATE)]
+        padded = np.zeros(ear.TURN_SAMPLES, dtype=np.float32)  # silence before, as Smart Turn's own code gives it
+        last = samples[-ear.TURN_SAMPLES:]
+        padded[len(padded) - len(last):] = last
+        expected = extractor(padded, sampling_rate=16000, return_tensors="np", padding="max_length", max_length=128000,
+                             truncation=True, do_normalize=True).input_features[0]
+        np.testing.assert_allclose(ear._log_mel(samples), expected, atol=1e-5)
 
 
 # --- talking over Jarvis, his voice cancelled out of the microphone -------------------------------------------------

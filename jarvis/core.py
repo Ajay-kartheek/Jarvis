@@ -35,7 +35,7 @@ from claude_agent_sdk import (
     tool,
 )
 
-from jarvis import agents, drafts, triage, work, workspace
+from jarvis import agents, drafts, manner, triage, work, workspace
 from jarvis import dossier as dossiers
 from jarvis import meeting as live
 from jarvis import projects as project_registry
@@ -67,6 +67,7 @@ APP_FOLDERS = (Path("/Applications"), Path("/System/Applications"))
 
 Step = Callable[[str], None]
 Text = Callable[[str], None]
+Tool = Callable[[str], None]
 
 _DRAFT_WORDS = re.compile(
     r"\b(drafts?|drafted|drafting|repl(?:y|ies|ied|ying)|respond|write|writing|compose|e-?mails?|mails?|messages?)\b",
@@ -93,9 +94,12 @@ def wants_send(message: str) -> bool:
     return bool(_SEND_WORDS.search(message))
 
 
-def stamp(message: str, spoken: bool = False) -> str:
+def stamp(message: str, spoken: bool = False, named: bool = True) -> str:
+    """The user's words as the model gets them: when, and how they came (spoken without Jarvis's name: in a
+    conversation, and perhaps not meant for him)."""
     now = datetime.now().astimezone()
-    return f"[{now:%A %d %B %Y, %H:%M} {now.tzname()}] [{'spoken' if spoken else 'typed'}] {message}"
+    how = ("spoken" if named else "spoken, no name") if spoken else "typed"
+    return f"[{now:%A %d %B %Y, %H:%M} {now.tzname()}] [{how}] {message}"
 
 
 def web_question_problem(question: str) -> str | None:
@@ -131,8 +135,14 @@ How you answer
 - Be someone to talk with. When you have done something, say what you did and what you found. When a request could mean two things and the difference matters, ask one short question. When there is an obvious next step, offer it in a few words.
 - Cards are for things worth keeping in view: a preparation sheet, a draft, a file you made, or something the user asks to see written out.
 - When the user wants the full detail (a long list, a table, a report, "give me everything"), write it as a markdown file with write_file in ~/Documents/Jarvis Notes/ (or where they say), open it with open_item, and tell them in a sentence what is in it.
-- Lead with the answer. Say dates in full. If you do not know, say so; never guess.
-- Every message starts with the time and with [spoken] or [typed]. Speech recognition mishears names and terms, so read a spoken message for what the user most plausibly meant, given their engagements, their people and the things you can do. A word that sounds like an engagement or a person is that engagement or person. "Claude Code" often arrives as "cloud code", "clock code" or "clock coordinate"; "Jarvis" as "Javis" or "Jervis". Ask back only when the difference would change what you do.
+- Lead with the answer. In writing, say dates in full. If you do not know, say so; never guess.
+- Every message starts with the time and with [spoken], [spoken, no name] or [typed]. Speech recognition mishears names and terms, so read a spoken message for what the user most plausibly meant, given their engagements, their people and the things you can do. A word that sounds like an engagement or a person is that engagement or person. "Claude Code" often arrives as "cloud code", "clock code" or "clock coordinate"; "Jarvis" as "Javis" or "Jervis". Ask back only when the difference would change what you do.
+
+How you sound
+- Calm, precise and quietly confident, with a dry wit used sparingly: the trusted aide who has worked with them for years. Warm, never gushing. No filler ("Great question", "Certainly!", "I hope this helps"), no long apologies, and no repeating their question back to them.
+- A spoken message is answered aloud, so write the reply the way you would say it: short sentences, usually one to three, the answer first and detail only where it matters. No lists, brackets or symbols. Times as people say them ("half past three", "quarter to eleven", "at four"), days rather than dates within the next week or so ("tomorrow at ten", "on Thursday"), and round numbers where exactness does not matter. Call people by their first names.
+- Do not announce what you are about to do ("Let me check", "I'll look into that"). When a spoken request takes a moment, a short line such as "Right, checking." has already been said for you; begin with what you found or did. On a long job the user hears a word of progress without your help.
+- In a spoken conversation the user does not repeat your name. A message marked [spoken, no name] was heard just after you spoke, without your name. Usually it is meant for you. When it plainly is not (they are talking to someone else in the room, or it is a stray fragment that makes no sense said to you), reply with exactly {manner.NOT_FOR_ME} and nothing else: it is never shown or said, and you stop listening until your name is said.
 
 Where to look
 - Anything about the latest or new mail, or a change to today's calendar: call refresh first. The local copy is otherwise a few minutes behind.
@@ -846,7 +856,7 @@ class Core:
             )
         return "\n".join(lines) + ("\n" if lines else "")
 
-    async def _turn(self, prompt: str, on_step: Step | None, on_text: Text | None) -> str:
+    async def _turn(self, prompt: str, on_step: Step | None, on_text: Text | None, on_tool: Tool | None = None) -> str:
         assert self._client is not None
         text = ""
         final = ""
@@ -858,6 +868,9 @@ class Core:
                     event = message.event
                     if event.get("type") == "message_start":
                         text = ""  # a new message replaces the working line before it
+                    block = event.get("content_block", {}) if event.get("type") == "content_block_start" else {}
+                    if block.get("type") == "tool_use" and on_tool:
+                        on_tool(str(block.get("name", "")))  # as the model begins to write it, before it runs
                     delta = event.get("delta", {}) if event.get("type") == "content_block_delta" else {}
                     if delta.get("type") == "text_delta":
                         text += delta.get("text", "")
@@ -897,9 +910,10 @@ class Core:
         self._may_send = any(wants_send(words) for _, words in self._asked)
         self._message = message
 
-    async def talk(self, message: str, *, spoken: bool = False, on_step: Step | None = None,
-                   on_text: Text | None = None) -> Answer:
-        """Answer one message. ``on_step`` hears what is being done; ``on_text`` the reply so far."""
+    async def talk(self, message: str, *, spoken: bool = False, named: bool = True, on_step: Step | None = None,
+                   on_text: Text | None = None, on_tool: Tool | None = None) -> Answer:
+        """Answer one message. ``on_step`` hears what is being done; ``on_text`` the reply so far; ``on_tool`` the name
+        of each tool as the model begins to use it. ``named``: a spoken message began with Jarvis's name."""
         started = time.monotonic()
         async with self._lock:
             try:
@@ -907,7 +921,7 @@ class Core:
                 self._hear(message)
                 self._drafts, self._web_asked, self._step = [], [], on_step
                 self._messages += 1
-                text = await self._turn(self._header() + stamp(message, spoken), on_step, on_text)
+                text = await self._turn(self._header() + stamp(message, spoken, named), on_step, on_text, on_tool)
                 answer = Answer(text, list(self._web_asked), time.monotonic() - started)
                 answer.drafts = list(self._drafts)
                 return answer

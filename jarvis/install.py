@@ -217,15 +217,19 @@ def deploy(progress: Progress = print) -> str:
 
 
 def fetch_ear_model(progress: Progress = print) -> bool:
-    """Put the ear's voice-activity model in the data folder, if it is not there yet. A failure is only a warning:
-    everything else works without it, and the next deploy tries again."""
+    """Put the ear's models in the data folder, if they are not there yet: the voice-activity model, and the one that
+    tells when the user has finished. A failure is only a warning: everything else works without them, and the next
+    deploy tries again."""
     from jarvis import ear
 
     try:
         ear.download()
         return True
     except Exception as exc:
-        progress(f"Warning: the ear's voice model could not be fetched ({exc}); \"Jarvis\" will not wake it yet.")
+        if ear.available():  # only the turn model is missing: a message then ends after a fixed pause
+            progress(f"Warning: the ear's turn model could not be fetched ({exc}); it ends messages after a fixed pause.")
+        else:
+            progress(f"Warning: the ear's voice model could not be fetched ({exc}); \"Jarvis\" will not wake it yet.")
         return False
 
 

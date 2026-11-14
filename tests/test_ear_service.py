@@ -217,21 +217,23 @@ def test_what_the_ear_takes_is_answered_like_a_spoken_message(fake_home):
         runtime = Runtime(load_config())
         said = []
 
-        async def talk(text, *, spoken=False, turn_id=None):
-            said.append((text, spoken))
+        async def talk(text, *, spoken=False, named=True, turn_id=None):
+            said.append((text, spoken, named))
             if len(said) == 2:
                 raise AgentError("Claude could not be reached")  # shown as the turn's error, nothing more
             return {}
 
         runtime.talk = talk
+        runtime.ear.by_name = True  # as the ear sets it just before it hands a message on
         runtime.ear._on_message("What time is it?")
+        runtime.ear.by_name = False  # a follow-up, without the name
         runtime.ear._on_message("And tomorrow?")
         await asyncio.sleep(0.01)
         assert not runtime._tasks  # both done, the failure included
         assert runtime.ear._on_listening == runtime.heard_starting  # he stops talking and gets ready while the user speaks
         return said
 
-    assert asyncio.run(scene()) == [("What time is it?", True), ("And tomorrow?", True)]
+    assert asyncio.run(scene()) == [("What time is it?", True, True), ("And tomorrow?", True, False)]
 
 
 def test_deploy_fetches_the_ears_voice_model_once_the_release_is_set_up(fake_home, monkeypatch):

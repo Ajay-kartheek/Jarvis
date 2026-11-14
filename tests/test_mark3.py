@@ -57,7 +57,7 @@ def client(fake_home):
     runtime = app.state.runtime
     runtime.settings["speak"] = False  # the voice needs a running service; what is said is checked as text
 
-    async def reply(text, *, spoken=False, on_step=None, on_text=None):
+    async def reply(text, *, spoken=False, named=True, on_step=None, on_text=None, on_tool=None):
         return Answer("Done.", [], 0.1)
 
     runtime.core.talk = reply

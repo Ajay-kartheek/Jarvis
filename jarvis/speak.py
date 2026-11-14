@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import functools
 import gc
+import hashlib
 import html
 import importlib.util
 import io
@@ -43,7 +44,7 @@ import threading
 import wave
 from pathlib import Path
 
-from jarvis import eleven
+from jarvis import eleven, paths
 
 log = logging.getLogger("jarvis")
 
@@ -278,24 +279,58 @@ def _plain_wav(data: bytes) -> bytes:
 # --- speaking ---------------------------------------------------------------
 
 
-def synthesize(text: str, previous: str = "") -> bytes:
+def synthesize(text: str, previous: str = "", keep: bool = False) -> bytes:
     """``text`` spoken, as the bytes of one sound file: MP3 from the cloud voice, otherwise WAV (mono, 16-bit).
-    ``previous`` is what was said just before in the same reply; the cloud voice takes its tune from it. Blocks; any
-    number of threads may call it."""
+    ``previous`` is what was said just before in the same reply; the cloud voice takes its tune from it. ``keep``: one
+    of Jarvis's own short lines ("Right, checking."), made once by each voice and kept on disk, so that it is heard at
+    once and costs the cloud voice nothing the second time. Blocks; any number of threads may call it."""
     if not any(char.isalnum() for char in text):
         return _wav(bytes(2 * RATE // 10), RATE)  # nothing to say: a tenth of a second of quiet
     text = _PRONOUNCED.sub(lambda found: SAY_AS[found[0].rstrip(".")], text)
+    if keep and (voice := engine()) is not None:
+        try:
+            return _kept(voice, text).read_bytes()
+        except OSError:
+            pass  # not made yet by this voice
+    sound, voice = _made(text, "" if keep else previous)
+    if keep:
+        _keep(_kept(voice, text), sound)
+    return sound
+
+
+def _made(text: str, previous: str) -> tuple[bytes, str]:
+    """``text`` spoken by the best voice that can speak now, and which voice that was."""
     if engine() == "elevenlabs":
         try:
-            return eleven.synthesize(text, previous)
+            return eleven.synthesize(text, previous), "elevenlabs"
         except eleven.Unavailable as exc:
             log.warning("the ElevenLabs voice could not speak (%s); using the voice on this Mac", exc)
     if local_engine() == "kokoro":
         try:
-            return _kokoro_wav(text)
+            return _kokoro_wav(text), "kokoro"
         except Exception as exc:
             log.warning("Kokoro could not speak (%s); using the system voice", exc)
-    return _system_wav(text)
+    return _system_wav(text), "system"
+
+
+def _kept(voice: str, text: str) -> Path:
+    """Where ``text`` said by ``voice`` is kept: a file per line and per everything that changes how it sounds."""
+    sounds = {
+        "elevenlabs": f"{eleven.VOICE} {eleven.MODEL} {eleven.FORMAT}",
+        "kokoro": f"{MODEL} {VOICE} {SPEED} {GAIN}",
+    }.get(voice, f"{_system_voice()} {SAY_RATE}")
+    digest = hashlib.sha256(f"{voice} {sounds}\n{text}".encode()).hexdigest()[:24]
+    return paths.data_dir() / "voice" / "lines" / f"{digest}.{'mp3' if voice == 'elevenlabs' else 'wav'}"
+
+
+def _keep(path: Path, sound: bytes) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_suffix(".part")
+        partial.write_bytes(sound)
+        partial.replace(path)
+    except OSError as exc:  # it is made again next time
+        log.warning("a spoken line could not be kept: %s", exc)
 
 
 def _wav(pcm: bytes, rate: int) -> bytes:

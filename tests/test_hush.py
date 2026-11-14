@@ -71,7 +71,7 @@ def test_a_new_message_stops_jarvis_and_cuts_short_the_answer_he_was_writing(run
     async def interrupt():
         calls.append("interrupt")
 
-    async def talk(text, *, spoken=False, on_step=None, on_text=None):
+    async def talk(text, *, spoken=False, named=True, on_step=None, on_text=None, on_tool=None):
         calls.append(text)
         return Answer("Fine.", [], 0.1)
 

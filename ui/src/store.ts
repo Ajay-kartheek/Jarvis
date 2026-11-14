@@ -264,6 +264,14 @@ function reduce(m: Model, action: Action): Model {
       return { ...m, turn: { ...turn, reply: msg.text, phase: "streaming" } };
     }
     case "reply": {
+      if (msg.ignored) {
+        // Heard in a conversation but meant for someone else: what was heard is taken back, and nothing was said.
+        const mine = m.turn?.id === msg.id ? m.turn : null;
+        const lines = m.app.conversation;
+        const last = lines[lines.length - 1];
+        const conversation = mine && last?.role === "user" && last.text === mine.text ? lines.slice(0, -1) : lines;
+        return { ...m, turn: mine ? null : m.turn, app: { ...m.app, conversation } };
+      }
       const before = turnFor(m, msg.id, now);
       // The socket and the request both bring the finished reply; the second one changes nothing.
       if (before.phase === "done" && before.reply === msg.text) return m;
