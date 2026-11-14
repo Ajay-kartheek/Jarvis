@@ -20,6 +20,7 @@ import json
 import os
 import plistlib
 import shutil
+import signal
 import subprocess
 import time
 import urllib.request
@@ -123,14 +124,38 @@ def is_loaded() -> bool:
 
 
 def stop(progress: Progress = print) -> None:
-    if not is_loaded():
+    if is_loaded():
+        _run(["launchctl", "bootout", f"{_domain()}/{LABEL}"], check=False)
+        for _ in range(50):  # the app closes its background service on the way out
+            if not is_loaded():
+                break
+            time.sleep(0.2)
+        progress("Stopped the running Jarvis.")
+    _stop_opened_by_hand(progress)
+
+
+def _opened_by_hand() -> list[int]:
+    """Copies of the installed app that launchd did not start: opened from Finder after a Quit, say. launchd cannot
+    stop them, and one left running keeps the old version going and turns the new one away (the app's lock)."""
+    program = str(installed_app() / "Contents" / "MacOS" / "Jarvis")
+    found = _run(["pgrep", "-x", "-f", program], check=False)  # exactly the app: not its capture helper
+    return [int(pid) for pid in found.stdout.split() if pid.isdigit()]
+
+
+def _stop_opened_by_hand(progress: Progress) -> None:
+    running = _opened_by_hand()
+    if not running:
         return
-    _run(["launchctl", "bootout", f"{_domain()}/{LABEL}"], check=False)
-    for _ in range(50):  # the app closes its background service on the way out
-        if not is_loaded():
+    for pid in running:
+        try:
+            os.kill(pid, signal.SIGTERM)  # the app takes it as Quit, and closes its background service too
+        except ProcessLookupError:
+            pass
+    for _ in range(50):
+        if not _opened_by_hand():
             break
         time.sleep(0.2)
-    progress("Stopped the running Jarvis.")
+    progress("Stopped the Jarvis that was opened by hand.")
 
 
 def answering(port: int) -> bool:
@@ -198,6 +223,7 @@ def fetch_ear_model(progress: Progress = print) -> bool:
 def restart(progress: Progress = print) -> None:
     """Start the installed Jarvis again so it picks up a new release."""
     if is_loaded():
+        _stop_opened_by_hand(progress)
         _run(["launchctl", "kickstart", "-k", f"{_domain()}/{LABEL}"])
         progress("Restarted Jarvis.")
 
