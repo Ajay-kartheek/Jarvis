@@ -95,7 +95,7 @@ def test_notes_are_found_by_search_and_survive_a_folder_sync(store):
     assert store.notes() == []
 
 
-def test_the_brief_for_a_meeting_carries_the_last_notes(store):
+def test_the_brief_for_a_meeting_carries_the_last_notes(store, fake_home):
     store.note_upsert("/notes/a.md", "Meeting notes: Atlas weekly", "Ravi owns the sign-off.", 1_700_000_000, "Atlas")
     text = meeting.build_brief(store, ATLAS, None, 1_700_100_000)
     assert "NOTES OF AN EARLIER MEETING" in text and "Ravi owns the sign-off." in text

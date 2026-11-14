@@ -5,7 +5,9 @@
   reports about calls, so nobody has to press Start;
 - Jarvis himself (the conversation) and the tasks he runs in the background;
 - background jobs: keeping the local copy fresh, the morning brief, meeting
-  notes after a call, and clearing old transcripts.
+  notes after a call, and clearing old transcripts;
+- speaking up by himself when new mail needs the user, and keeping each
+  engagement's dossier and promises up to date.
 
 Everything the interface shows comes out of :meth:`Runtime.state` and the
 events published on the hub.
@@ -19,7 +21,7 @@ import logging
 import os
 import time
 from collections import deque
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import datetime
 from pathlib import Path
 
@@ -48,8 +50,13 @@ MODEL_IDLE_SECONDS = 600
 AUTO_PREP_NEAREST = 12 * 60  # prepare for meetings that start between these two, in seconds from now
 AUTO_PREP_FURTHEST = 50 * 60
 AUTO_PREP_PER_DAY = 3
-DEFAULT_SETTINGS = {"speak": True, "auto_prep": True}
+# wake_word is kept and reported here; the ear reads it.
+DEFAULT_SETTINGS = {"speak": True, "auto_prep": True, "proactive": True, "wake_word": True}
 REMINDER_LATE_SECONDS = 15 * 60
+PROPOSALS_PER_DAY = 6
+PROPOSALS = "proposals"  # where the store counts the proposals made each day
+HELD_SHOWN = 2  # of the proposals that waited for a call to end, this many are shown
+PROPOSAL_ORDER = ("meeting_change", "watch_hit", "needs_reply", "fyi")  # which held ones go first
 
 
 def now_iso() -> str:
@@ -157,6 +164,7 @@ class MeetingController:
             self._out = None
             self._set("idle")
             self.runtime.spawn(self.runtime.wrap_up(out))
+            self.runtime.release_proposals()
 
     async def stop(self) -> None:
         if self.running:
@@ -315,6 +323,11 @@ class Runtime:
         self._folders_due = False
         self._voice_playing = False
         self._auto_prepared: set[str] = set()
+        self._held: list[dict] = []  # proposals waiting for a call to end
+        self._looking = False  # a look at new mail is under way
+        self._dossier_lock = asyncio.Lock()  # one dossier is written at a time
+        self._rebuilding: set[str] = set()
+        self._dossiers_on = ""  # the day the dossiers were last checked
         self._load_settings()
 
     # --- what the interface sees -------------------------------------------
@@ -554,6 +567,160 @@ class Runtime:
         await asyncio.sleep(0)  # by now the conversation's lock is taken
         self.publish_state()
 
+    # --- speaking up unasked ---------------------------------------------------
+
+    def in_call(self) -> bool:
+        return self.meeting.running or self.autopilot.call_active
+
+    def propose(self, text: str, actions: list[dict], *, mail: int | None = None, kind: str = "fyi",
+                on_shown: Callable[[], None] | None = None) -> bool:
+        """Jarvis speaks up by himself about something the user would want to know now.
+
+        A card with up to three answers (pressing one sends its words as a typed
+        message), said like anything else Jarvis says by himself, and logged.
+        At most six a day, none while the setting ``proactive`` is off, and none
+        during a call: those wait for it to end. ``on_shown`` runs once it is
+        shown. Returns False when it was dropped.
+        """
+        if not self.settings["proactive"]:
+            return False
+        proposal = {"text": text, "actions": actions, "mail": mail, "kind": kind, "on_shown": on_shown}
+        if self.in_call():
+            self._held.append(proposal)
+            return True
+        return self._put_up(proposal)
+
+    def _proposals_today(self, store) -> int:
+        return int(store.get_state(LOCAL_ACCOUNT, PROPOSALS, datetime.now().date().isoformat()) or 0)
+
+    def _put_up(self, proposal: dict) -> bool:
+        with open_store() as store:
+            made = self._proposals_today(store)
+            if made >= PROPOSALS_PER_DAY:
+                return False
+            store.set_state(LOCAL_ACCOUNT, PROPOSALS, datetime.now().date().isoformat(), made + 1)
+        text, mail = proposal["text"], proposal["mail"]
+        self.show_card({"kind": "proposal", "title": "", "body": text, "actions": proposal["actions"], "mail": mail})
+        self.say(text)
+        self.call_attention()
+        self.record("proposal", f"Spoke up: {text[:200]}")
+        self.note(f"You spoke up by yourself and told the user: \"{text}\"" + (f" (about mail [{mail}])." if mail else "."))
+        if proposal["on_shown"] is not None:
+            try:
+                proposal["on_shown"]()
+            except Exception as exc:  # what follows from it must not take back what was shown
+                log.warning("after a proposal: %s", exc)
+        return True
+
+    def release_proposals(self) -> int:
+        """After a call: show the proposals that waited for it, the most pressing two at most."""
+        if not self._held or self.in_call():
+            return 0
+        held, self._held = self._held, []
+        if not self.settings["proactive"]:
+            return 0
+        rank = {kind: place for place, kind in enumerate(PROPOSAL_ORDER)}
+        chosen = sorted(held, key=lambda proposal: rank.get(proposal["kind"], len(rank)))[:HELD_SHOWN]
+        return sum(1 for proposal in chosen if self._put_up(proposal))
+
+    async def look_at_mail(self) -> list:
+        """After a sync: let a small model decide whether new mail should interrupt the user."""
+        from jarvis import triage
+
+        if self._looking or not self.settings["proactive"] or self.core.busy:
+            return []  # the mail waits for the next sync: a reply being written is not interrupted
+        with open_store() as store:
+            if self._proposals_today(store) >= PROPOSALS_PER_DAY:
+                return []
+        self._looking = True
+        try:
+            return await triage.look(self)
+        except Exception as exc:
+            log.warning("looking at new mail failed: %s", exc)
+            return []
+        finally:
+            self._looking = False
+
+    # --- what Jarvis knows about each engagement ---------------------------------
+
+    async def rebuild_dossier(self, name: str, *, asked: bool = False) -> bool:
+        """Write an engagement's dossier again from its material. ``asked``: the user wants to hear when it is done."""
+        from jarvis import dossier
+
+        if name in self._rebuilding:
+            return False
+        self._rebuilding.add(name)
+        try:
+            async with self._dossier_lock:
+                text = await dossier.build(self.config, name)
+        except Exception as exc:
+            log.warning("the dossier of %s could not be built: %s", name, exc)
+            text = None
+        finally:
+            self._rebuilding.discard(name)
+        if text is not None:
+            self.record("dossier", f"Rebuilt the dossier of {name}")
+        if asked:
+            done = f"The {name} dossier is up to date." if text else f"The {name} dossier could not be rebuilt."
+            self.note(done)
+            self.say(done)
+        return text is not None
+
+    async def refresh_dossiers(self) -> list[str]:
+        """Once a day: rebuild the dossiers of engagements that had new mail, notes or work since their last build."""
+        from jarvis import dossier
+
+        with open_store() as store:
+            due = dossier.due(store, self.config, time.time())
+        rebuilt = []
+        for name in due:
+            if self.meeting.running:  # a call gets the machine to itself; the rest wait for tomorrow
+                break
+            if await self.rebuild_dossier(name):
+                rebuilt.append(name)
+        return rebuilt
+
+    def rebuilding(self, name: str) -> bool:
+        return name in self._rebuilding
+
+    async def after_notes(self, title: str, engagement: str | None, at: str, text: str, source: str) -> None:
+        """After a call's notes are written: record the promises made in it, and bring its engagement's dossier up to date."""
+        from jarvis import promises
+
+        try:
+            added = await promises.from_notes(self.config, title, engagement, at, text, source)
+            if added:
+                self.record("promise", f"Noted {len(added)} promises from the call \"{title}\"")
+        except Exception as exc:
+            log.warning("promises from %s failed: %s", title, exc)
+        if engagement:
+            await self.update_dossier(engagement, title, at, text)
+
+    async def update_dossier(self, engagement: str, title: str, at: str, text: str) -> None:
+        from jarvis import dossier
+
+        try:
+            async with self._dossier_lock:
+                updated = await dossier.update(self.config, engagement, title, at, text)
+        except Exception as exc:
+            log.warning("the dossier of %s could not be updated: %s", engagement, exc)
+            return
+        if updated:
+            self.record("dossier", f"Updated the dossier of {engagement} from the call \"{title}\"")
+
+    def call_refiled(self, note: dict, engagement: str | None) -> None:
+        """The latest call was filed under the wrong engagement (``note`` as it was) and now belongs to ``engagement``.
+
+        The dossier it went into is written again without it; the one it belongs to takes it in.
+        """
+        if note["project"] == engagement:
+            return
+        if note["project"]:
+            self.spawn(self.rebuild_dossier(note["project"]))
+        if engagement:
+            at = datetime.fromtimestamp(note["ts"]).astimezone().isoformat(timespec="seconds")
+            self.spawn(self.update_dossier(engagement, note["title"], at, note["body"]))
+
     # --- background work -----------------------------------------------------
 
     def spawn(self, work: Coroutine) -> asyncio.Task | None:
@@ -668,6 +835,8 @@ class Runtime:
         self.last_sync = now_iso()
         self._engagements = (0.0, [])
         self.publish_state()
+        if any(result["source"] == "gmail" and result["status"] == "ok" for result in results):
+            self.spawn(self.look_at_mail())
         return results
 
     async def reconnect(self) -> str:
@@ -692,6 +861,7 @@ class Runtime:
             try:
                 self.auto_prepare()
                 self.remind_due()
+                self.release_proposals()
                 if speech.unload_if_idle(MODEL_IDLE_SECONDS):
                     log.info("speech model released")
                 if self._sounded_at and time.monotonic() - self._sounded_at > MODEL_IDLE_SECONDS:
@@ -784,6 +954,9 @@ class Runtime:
                 self.hub.publish({"type": "brief", **written})
                 self.note("The morning brief for today was written; it is on the dashboard.")
                 self.call_attention()
+        if self._dossiers_on != today and datetime.now().hour >= BRIEF_FROM_HOUR and not self.meeting.running:
+            self._dossiers_on = today
+            self.spawn(self.refresh_dossiers())  # minutes of reading: it must not hold up the other daily jobs
 
     def load_brief(self) -> None:
         from jarvis import brief
@@ -817,6 +990,7 @@ class Runtime:
         })
         self.note(f"The call \"{note.title}\" ended and its notes were written; they are on a card and saved.")
         self.call_attention()
+        self.spawn(self.after_notes(note.title, note.engagement, note.at, note.text, str(note.path)))
 
     async def recover_notes(self) -> None:
         """Write the notes of calls that ended while Jarvis was being shut down."""

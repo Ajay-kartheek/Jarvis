@@ -18,6 +18,7 @@ Both run through the Claude Agent SDK on the Claude plan login.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from collections.abc import Callable
@@ -323,6 +324,36 @@ async def run_plain(config: Config, job: str, system_prompt: str, prompt: str) -
     """One answer from a model that has no tools at all: for notes, briefs and sorting."""
     options = _options(_route(config, job, job), system_prompt, tools=[], max_turns=1)
     return await _run(prompt, options, None)
+
+
+_FENCED = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+_DECODER = json.JSONDecoder()
+LIST_STARTS_TRIED = 5
+
+
+def json_answer(text: str):
+    """What a model that was asked for JSON only answered, or None when there is no JSON in it.
+
+    Tolerates a code fence, or words before and after a list. The value is
+    whatever the model wrote: whoever asked still has to check every part of it.
+    """
+    cleaned = (text or "").strip()
+    fenced = _FENCED.search(cleaned)
+    for candidate in (cleaned, fenced.group(1) if fenced else None):
+        if candidate:
+            try:
+                return json.loads(candidate)
+            except (ValueError, RecursionError):
+                continue
+    start = cleaned.find("[")
+    for _ in range(LIST_STARTS_TRIED):  # the first "[" may belong to the words around the list
+        if start < 0:
+            break
+        try:
+            return _DECODER.raw_decode(cleaned, start)[0]
+        except (ValueError, RecursionError):
+            start = cleaned.find("[", start + 1)
+    return None
 
 
 _WEB_SECTION = re.compile(r"\n\s*WEB:\s*\n(?P<queries>.*)\Z", re.DOTALL)

@@ -1,8 +1,9 @@
 """The morning brief: what today holds and who is waiting on the user.
 
 Written once a day by the daemon from the local copy: today's meetings, the
-latest message of each mail thread since the last working day, and the action
-items of recent meeting notes. The model has no tools and sees only that text.
+latest message of each mail thread since the last working day, the user's own
+promises that fall due within three days, and the action items of recent
+meeting notes. The model has no tools and sees only that text.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 
-from jarvis import agents, paths
+from jarvis import agents, paths, promises
 from jarvis import meeting as live
 from jarvis import projects as project_registry
 from jarvis.config import Config
@@ -21,8 +22,9 @@ SNIPPET_CHARS = 220
 NOTE_CHARS = 1_500
 NOTES = 3
 MIN_LOOKBACK_HOURS = 20
+PROMISES_DUE_DAYS = 3
 
-INSTRUCTIONS = """You prepare the user's morning brief. You are given today's meetings, the latest message of each recent mail thread, and the notes of their recent meetings.
+INSTRUCTIONS = """You prepare the user's morning brief. You are given today's meetings, the latest message of each recent mail thread, the user's own promises that fall due soon, and the notes of their recent meetings.
 
 Write markdown with these sections, in this order, leaving out any that would be empty:
 ## Today
@@ -30,7 +32,7 @@ One line per meeting: time, title, and what to have ready for it, drawn from the
 ## Needs your reply
 Mails where someone is waiting on the user: who, what they need, and by when if they said. Most pressing first, at most seven. Leave out threads where the user sent the last message, newsletters, and automatic notifications.
 ## Carried over
-Action items the user took on in recent meetings that are still open, at most five.
+The user's promises that fall due soon, with their dates, then action items they took on in recent meetings that are still open; at most five in all.
 ## Worth knowing
 At most five other things: decisions, dates that moved, documents shared.
 
@@ -88,6 +90,16 @@ def gather(config: Config, store: Store, now: datetime) -> str:
         )
     parts.append(f"MAIL SINCE {since:%A %d %B, %H:%M} (latest message of each thread, newest first)\n"
                  + ("\n".join(lines) or "(none)"))
+
+    today, due_by = now.date().isoformat(), now.date() + timedelta(days=PROMISES_DUE_DAYS)
+    owed = [
+        promise for promise in store.promises(status="open")
+        if promise["owner"] == promises.ME and promise["due"] and promise["due"] <= due_by.isoformat()
+    ]
+    if owed:
+        parts.append(f"THE USER'S OWN PROMISES DUE BY {due_by:%A %d %B} (still open)\n" + "\n".join(
+            promises.line(promise, engagement=True) + (" (overdue)" if promise["due"] < today else "") for promise in owed
+        ))
 
     notes = [
         f"### {note.title} ({datetime.fromtimestamp(note.ts or 0):%a %d %b})\n{note.body[:NOTE_CHARS]}"

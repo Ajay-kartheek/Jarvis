@@ -135,7 +135,8 @@ def correct_latest(*, title: str | None = None, engagement: str | None = None, d
     """Fix how the latest call was filed: another title or engagement, or drop its notes altogether.
 
     Returns the title it was filed under, or None when there are no notes.
-    ``engagement`` "" means: it belongs to no engagement.
+    ``engagement`` "" means: it belongs to no engagement. The promises taken
+    from the notes follow them, or go with them.
     """
     with open_store() as store:
         found = store.artifacts("notes", limit=1)
@@ -147,6 +148,7 @@ def correct_latest(*, title: str | None = None, engagement: str | None = None, d
             store.artifact_delete(note["id"])
             if path is not None:
                 store.note_delete(str(path))
+                store.promises_drop(str(path))
                 path.unlink(missing_ok=True)
             store.log("notes", f"Discarded the notes of {note['title']}")
             return note["title"]
@@ -155,6 +157,7 @@ def correct_latest(*, title: str | None = None, engagement: str | None = None, d
         store.artifact_change(note["id"], title=new_title, project=project)
         if path is not None:
             store.note_upsert(str(path), f"Meeting notes: {new_title}", note["body"], note["ts"], project)
+            store.promises_refile(str(path), project)
         store.log("notes", f"Refiled the notes of {note['title']} as {new_title}")
         return note["title"]
 

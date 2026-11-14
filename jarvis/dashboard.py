@@ -9,6 +9,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from jarvis import dossier
+from jarvis import projects as project_registry
+from jarvis.config import Config
 from jarvis.store import open_store
 
 if TYPE_CHECKING:
@@ -83,6 +86,33 @@ def facts() -> list[dict]:
 def forget(fact_id: int) -> bool:
     with open_store() as store:
         return store.fact_delete(fact_id)
+
+
+def _promise(row: dict) -> dict:
+    return {key: row[key] for key in ("id", "engagement", "owner", "text", "due", "status")}
+
+
+def promises() -> list[dict]:
+    """Who owes what, open ones first."""
+    with open_store() as store:
+        return [_promise(row) for row in store.promises()]
+
+
+def engagement(config: Config, name: str) -> dict | None:
+    """Everything Jarvis keeps on one engagement, or None when there is no such engagement."""
+    with open_store() as store:
+        project = project_registry.find(store, name, config)
+        if project is None:
+            return None
+        files = len(store.local_known(project.name))
+        facts = [fact for fact in store.facts(project.name, limit=200) if fact["project"] == project.name]
+        owed = store.promises(project.name)
+    return {
+        "name": project.name, "people": list(project.people), "folders": len(project.folders), "files": files,
+        "dossier": dossier.read(project.name) or None,
+        "facts": [{"id": fact["id"], "text": fact["text"], "engagement": fact["project"], "at": iso(fact["ts"])} for fact in facts],
+        "promises": [_promise(row) for row in owed],
+    }
 
 
 def activity(limit: int = 200) -> list[dict]:

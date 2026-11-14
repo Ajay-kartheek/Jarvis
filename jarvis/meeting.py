@@ -26,7 +26,9 @@ from types import SimpleNamespace
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage, StreamEvent
 
+from jarvis import dossier
 from jarvis import projects as project_registry
+from jarvis import vocabulary
 from jarvis.config import Config
 from jarvis.projects import Project
 from jarvis.store import LOCAL_ACCOUNT, NOTE_PREFIX, PREP_PREFIX, Store, open_store
@@ -43,6 +45,7 @@ TURNS_BEFORE_RESET = 50
 PREVIOUS_NOTES = 2
 PREP_FRESH_SECONDS = 18 * 3600  # a preparation sheet counts for meetings later the same day
 PREP_CHARS = 6_000
+DOSSIER_CHARS = 3_000
 NOTE_CHARS = 2_500
 REBIND_ATTEMPTS = 2
 NOTHING = "NONE"
@@ -300,6 +303,9 @@ def build_brief(store: Store, project: Project | None, event: dict | None, now: 
     told = store.facts(project.name, limit=30)
     if told:
         parts.append("WHAT THE USER HAS TOLD JARVIS (trust these)\n" + "\n".join(f"- {fact['text']}" for fact in told))
+    known = dossier.read(project.name)
+    if known:
+        parts.append("WHAT JARVIS KNOWS ABOUT THIS ENGAGEMENT (the start of its dossier)\n" + known[:DOSSIER_CHARS])
     mail = store.search(
         "", kind="mail", project=project.name, after=int(now) - RECENT_MAIL_DAYS * 86_400,
         order="newest", limit=20,
@@ -583,6 +589,7 @@ async def run(config: Config, *, project_name: str | None = None, seconds: float
             args=(SimpleNamespace(
                 seconds=seconds, wav=wav, say=say, say_after=10.0, partials=False, out=None,
                 echo_guard=echo_guard, quiet=True, stop=stop,
+                vocabulary=vocabulary.words(store, config, extra=(meeting.event or {}).get("people", [])),
                 on_sentence=lambda speaker, text: post("sentence", speaker, text),
                 on_partial=lambda speaker, text: post("partial", speaker, text),
                 on_level=lambda source, level: post("level", source, level),

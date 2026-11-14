@@ -32,7 +32,7 @@ from claude_agent_sdk import (
     tool,
 )
 
-from jarvis import agents, paths, work
+from jarvis import agents, dossier, paths, promises, work
 from jarvis import projects as project_registry
 from jarvis.store import PREP_PREFIX, Store, open_store
 from jarvis.textutil import clip
@@ -140,6 +140,14 @@ def prep_request(task: Task, store: Store, runtime_config) -> str:
         lines.append("Engagement: not identified. Work from the meeting's title and the people in it.")
     if task.focus:
         lines.append(f"What the user said when asking: {task.focus}")
+    if task.engagement:
+        known = dossier.read(task.engagement)
+        if known:
+            lines += ["", "WHAT JARVIS KNOWS ABOUT THIS ENGAGEMENT (its dossier, written from mail, notes and files; "
+                          "check what matters against the material)", known]
+        owed = store.promises(task.engagement, status="open")
+        if owed:
+            lines += ["", "OPEN PROMISES (both ways; \"me\" is the user)", *(promises.line(promise) for promise in owed)]
     lines.extend(agents.told_lines(store, task.engagement))
     lines.append("")
     lines.append("Prepare the user for this meeting.")

@@ -58,6 +58,8 @@ class SettingsRequest(BaseModel):
     auto: bool | None = None
     speak: bool | None = None
     auto_prep: bool | None = None
+    proactive: bool | None = None  # Jarvis may speak up by himself about new mail
+    wake_word: bool | None = None  # "Hey Jarvis" wakes him
 
 
 class AutoRequest(BaseModel):
@@ -156,6 +158,17 @@ def create_app(config: Config, *, background: bool = False) -> FastAPI:
                 {"id": item["id"], "due": dashboard.iso(item["due_ts"]), "text": item["text"]}
                 for item in store.reminders()
             ]
+
+    @app.get("/api/promises")
+    async def get_promises() -> list[dict]:
+        return dashboard.promises()
+
+    @app.get("/api/engagements/{name}")
+    async def get_engagement(name: str) -> dict:
+        found = dashboard.engagement(config, name)
+        if found is None:
+            raise HTTPException(404, "There is no engagement with that name.")
+        return found
 
     @app.post("/api/auto")
     async def set_auto(body: AutoRequest) -> dict:

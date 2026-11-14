@@ -159,7 +159,7 @@ def test_finding_the_meeting_someone_means(store):
     assert meeting.find_meeting(store, ME, known, now=now)["title"] == "Atlas - internal sync"  # nothing named: the next one
 
 
-def test_the_live_brief_starts_from_the_preparation_and_what_jarvis_was_told(store):
+def test_the_live_brief_starts_from_the_preparation_and_what_jarvis_was_told(store, fake_home):
     now = 1_700_000_000
     store.artifact_add("prep", "Atlas weekly", project="Atlas", body="**Goal for this call**: agree the rehearsal date.", ts=now - 3600)
     store.fact_add("Ravi decides on dates, not Priya", "Atlas")
@@ -173,7 +173,7 @@ def test_the_live_brief_starts_from_the_preparation_and_what_jarvis_was_told(sto
 # --- preparing ---------------------------------------------------------------------
 
 
-def test_what_the_preparing_session_is_told(store):
+def test_what_the_preparing_session_is_told(store, fake_home):
     store.fact_add("Ravi is the technical lead", "Atlas")
     task = tasks.Task(
         id="k1", kind="prep", title="Prepare: Atlas <> Client weekly", engagement="Atlas",
@@ -260,11 +260,14 @@ def test_cards_are_shown_replaced_and_dismissed(client):
 
 
 def test_settings_are_kept_across_a_restart(client, fake_home):
-    assert client.get("/api/settings").json() == {"speak": True, "auto_prep": True, "auto": True}
-    changed = client.post("/api/settings", json={"speak": False, "auto": False}).json()
-    assert changed == {"speak": False, "auto_prep": True, "auto": False}
+    assert client.get("/api/settings").json() == {
+        "speak": True, "auto_prep": True, "proactive": True, "wake_word": True, "auto": True,
+    }
+    changed = client.post("/api/settings", json={"speak": False, "auto": False, "proactive": False}).json()
+    assert changed == {"speak": False, "auto_prep": True, "proactive": False, "wake_word": True, "auto": False}
     reopened = create_app(load_config()).state.runtime
     assert reopened.settings["speak"] is False and reopened.autopilot.enabled is False
+    assert reopened.settings["proactive"] is False and reopened.settings["wake_word"] is True
 
 
 def test_jarvis_speaking_up_is_shown_even_when_it_stays_silent(client):

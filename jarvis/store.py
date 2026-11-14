@@ -192,6 +192,28 @@ CREATE TABLE IF NOT EXISTS reminders (
     ts      INTEGER NOT NULL
 );
 
+-- Standing orders: what the user asked to be told about when it happens.
+CREATE TABLE IF NOT EXISTS watches (
+    id       INTEGER PRIMARY KEY,
+    text     TEXT NOT NULL,
+    done     INTEGER NOT NULL DEFAULT 0,
+    fired_ts INTEGER,                -- when the user was last told that it happened
+    ts       INTEGER NOT NULL
+);
+
+-- Who owes what in an engagement, taken from call notes or said by the user.
+CREATE TABLE IF NOT EXISTS promises (
+    id         INTEGER PRIMARY KEY,
+    engagement TEXT,
+    owner      TEXT NOT NULL,        -- 'me' for the user, otherwise a person's name
+    text       TEXT NOT NULL,
+    due        TEXT,                 -- YYYY-MM-DD, or NULL when no date was given
+    status     TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done')),
+    source     TEXT NOT NULL DEFAULT 'user',  -- where it came from: 'user', or the file of the notes
+    ts         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS promises_engagement ON promises(engagement, status);
+
 CREATE TABLE IF NOT EXISTS docs (
     doc_id    INTEGER PRIMARY KEY,
     account   TEXT NOT NULL,
@@ -947,6 +969,71 @@ class Store:
     def reminder_done(self, reminder_id: int) -> bool:
         with self._tx():
             return self.db.execute("UPDATE reminders SET done=1 WHERE id=? AND done=0", (reminder_id,)).rowcount > 0
+
+    # --- standing orders -----------------------------------------------------------
+
+    def watch_add(self, text: str) -> int:
+        with self._tx():
+            cursor = self.db.execute("INSERT INTO watches(text, ts) VALUES (?,?)", (text.strip(), int(time.time())))
+        return int(cursor.lastrowid)
+
+    def watches(self) -> list[dict]:
+        """Standing orders still in force, oldest first."""
+        rows = self.db.execute("SELECT id, text, fired_ts, ts FROM watches WHERE done=0 ORDER BY id").fetchall()
+        return [dict(row) for row in rows]
+
+    def watch_fired(self, watch_id: int, *, done: bool) -> bool:
+        """The user was told that it happened. ``done`` ends the order; otherwise it stays for the next time."""
+        with self._tx():
+            return self.db.execute(
+                "UPDATE watches SET fired_ts=?, done=? WHERE id=? AND done=0", (int(time.time()), int(done), watch_id)
+            ).rowcount > 0
+
+    def watch_done(self, watch_id: int) -> bool:
+        with self._tx():
+            return self.db.execute("UPDATE watches SET done=1 WHERE id=? AND done=0", (watch_id,)).rowcount > 0
+
+    # --- promises ------------------------------------------------------------------
+
+    def promise_add(self, engagement: str | None, owner: str, text: str, due: str | None = None,
+                    source: str = "user") -> int:
+        with self._tx():
+            cursor = self.db.execute(
+                "INSERT INTO promises(engagement, owner, text, due, source, ts) VALUES (?,?,?,?,?,?)",
+                (engagement, owner.strip(), text.strip(), due, source, int(time.time())),
+            )
+        return int(cursor.lastrowid)
+
+    def promises(self, engagement: str | None = None, *, status: str | None = None, limit: int = 200) -> list[dict]:
+        """Open ones first, the soonest due at the top and those without a date after them; then the done ones."""
+        filters, args = [], []
+        for column, value in (("engagement", engagement), ("status", status)):
+            if value is not None:
+                filters.append(f"{column}=?")
+                args.append(value)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+        rows = self.db.execute(
+            f"SELECT id, engagement, owner, text, due, status, source, ts FROM promises {where} "
+            "ORDER BY status='done', due IS NULL, due, ts DESC, id DESC LIMIT ?",
+            [*args, limit],
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def promise_close(self, promise_id: int) -> bool:
+        with self._tx():
+            return self.db.execute(
+                "UPDATE promises SET status='done' WHERE id=? AND status='open'", (promise_id,)
+            ).rowcount > 0
+
+    def promises_refile(self, source: str, engagement: str | None) -> int:
+        """Move the promises that came from one source (a call's notes) to another engagement."""
+        with self._tx():
+            return self.db.execute("UPDATE promises SET engagement=? WHERE source=?", (engagement, source)).rowcount
+
+    def promises_drop(self, source: str) -> int:
+        """Forget the promises that came from one source: its notes were discarded."""
+        with self._tx():
+            return self.db.execute("DELETE FROM promises WHERE source=?", (source,)).rowcount
 
     # --- what Jarvis made and did ------------------------------------------------
 
