@@ -35,11 +35,13 @@ def _creds(granted: list[str] | None = None, refresh_token: str | None = "r-toke
     )
 
 
-def test_scopes_are_exactly_the_four_agreed():
+def test_scopes_are_exactly_the_five_agreed():
+    # Calendar events were added when the user agreed that Jarvis may answer invitations and place holds after a yes.
     assert list(SCOPES) == [
         "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/gmail.compose",
         "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar.events",
         "https://www.googleapis.com/auth/drive.readonly",
     ]
 

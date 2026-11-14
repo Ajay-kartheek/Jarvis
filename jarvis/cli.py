@@ -112,7 +112,7 @@ def auth_add(
         int, typer.Option("--timeout", help="Seconds to wait for the browser sign-in.")
     ] = google_auth.DEFAULT_CONSENT_TIMEOUT_SECONDS,
 ) -> None:
-    """Sign a Google account in (read-only access plus Gmail drafts)."""
+    """Sign a Google account in: reading, Gmail drafts (sent only after the user says yes) and calendar events."""
     config = _config()
     if client is None and not paths.google_client_file().exists():
         typer.secho(
