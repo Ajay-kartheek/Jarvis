@@ -71,7 +71,7 @@ def test_a_new_message_stops_jarvis_and_cuts_short_the_answer_he_was_writing(run
     async def interrupt():
         calls.append("interrupt")
 
-    async def talk(text, *, spoken=False, named=True, on_step=None, on_text=None, on_tool=None):
+    async def talk(text, *, spoken=False, named=True, continues="", on_step=None, on_text=None, on_tool=None):
         calls.append(text)
         return Answer("Fine.", [], 0.1)
 
@@ -116,6 +116,30 @@ def test_nothing_to_cut_short_when_no_answer_is_being_written(fake_home):
     conversation = Core(load_config(), SimpleNamespace())
     conversation._client = SimpleNamespace(interrupt=lambda: pytest.fail("no answer was being written"))
     asyncio.run(conversation.interrupt())
+
+
+def test_a_message_cut_short_while_the_conversation_is_still_opening_is_not_answered_at_all(fake_home, monkeypatch):
+    conversation = Core(load_config(), SimpleNamespace())
+
+    async def opening():
+        await conversation.interrupt()  # the user went on, or moved on, meanwhile
+
+    monkeypatch.setattr(conversation, "_ensure", opening)
+    monkeypatch.setattr(conversation, "_turn", lambda *args: pytest.fail("the model is not asked"))
+    answer = asyncio.run(conversation.talk("Send the deck to", spoken=True))
+    assert answer.text == "" and not conversation._starting
+
+    async def then():  # the next message is answered as usual
+        monkeypatch.setattr(conversation, "_ensure", lambda: asyncio.sleep(0))
+        monkeypatch.setattr(conversation, "_header", lambda: "")
+
+        async def turn(prompt, *args):
+            return "Sent."
+
+        monkeypatch.setattr(conversation, "_turn", turn)
+        return await conversation.talk("Send the deck to the team", spoken=True)
+
+    assert asyncio.run(then()).text == "Sent."
 
 
 def test_the_page_can_stop_jarvis_talking(fake_home, monkeypatch):

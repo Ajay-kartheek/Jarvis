@@ -199,7 +199,7 @@ def client(fake_home):
     app = create_app(load_config())
     runtime = app.state.runtime
 
-    async def reply(text, *, spoken=False, named=True, on_step=None, on_text=None, on_tool=None):
+    async def reply(text, *, spoken=False, named=True, continues="", on_step=None, on_text=None, on_tool=None):
         if "fail" in text:
             raise AgentError("The model is not reachable.")
         if on_step:

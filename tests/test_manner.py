@@ -36,8 +36,8 @@ def _model(*steps, reply: str):
     """A stand-in for the model: each step is text written so far, or ("tool", name), or ("wait", seconds)."""
     asked = []
 
-    async def talk(text, *, spoken=False, named=True, on_step=None, on_text=None, on_tool=None):
-        asked.append((text, spoken, named))
+    async def talk(text, *, spoken=False, named=True, continues="", on_step=None, on_text=None, on_tool=None):
+        asked.append((text, spoken, named) if not continues else (text, spoken, named, continues))
         for step in steps:
             if isinstance(step, tuple) and step[0] == "tool":
                 on_tool(step[1])
@@ -114,13 +114,17 @@ def test_the_user_ends_the_conversation(message):
     assert manner.ending(message) in manner.CLOSING
 
 
-@pytest.mark.parametrize("message", ["Stop.", "OK stop talking please", "Quiet", "That's enough."])
+@pytest.mark.parametrize("message", [
+    "Stop.", "OK stop talking please", "Quiet", "That's enough.", "Stop, stop, st", "stop stop stop", "Wait, wait.",
+    "Hold on", "Okay, stop, wai",
+])
 def test_wanting_him_quiet_gets_no_answer_at_all(message):
     assert manner.ending(message) == ""
 
 
 @pytest.mark.parametrize("message", [
     "Thanks, and check the mail too", "That's all I needed to know about the budget, what's next?", "Stop the recording",
+    "Wait, what about the budget?", "Hold on to the draft",
 ])
 def test_a_message_that_goes_on_does_not_end_it(message):
     assert manner.ending(message) is None
@@ -230,17 +234,19 @@ def test_thats_all_ends_the_conversation_without_a_model(runtime, monkeypatch):
     assert runtime.ended == [True]
 
 
-def test_stop_ends_it_in_silence(runtime, monkeypatch):
+def test_stop_quiets_him_and_he_listens_for_what_comes_next(runtime, monkeypatch):
     monkeypatch.setattr(runtime.core, "talk", lambda *args, **kwargs: pytest.fail("no model is asked"))
+    listening = []
+    monkeypatch.setattr(runtime.ear, "speaking_ended", lambda: listening.append(True))
 
     async def scene():
         queue = runtime.hub.join()
-        reply = await runtime.talk("Stop.", spoken=True)
+        reply = await runtime.talk("Stop, stop, st", spoken=True)
         return reply, _events(queue)
 
     reply, events = asyncio.run(scene())
     assert reply["text"] == "" and _said(events) == []
-    assert runtime.ended == [True]
+    assert runtime.ended == [] and listening == [True]  # the conversation goes on: the user has more to say
 
 
 def test_typed_thanks_is_answered_by_the_model(runtime, monkeypatch):
@@ -285,7 +291,7 @@ def test_a_follow_up_meant_for_him_is_answered(runtime, monkeypatch):
 def test_the_ear_says_whether_a_message_began_with_the_name(runtime, monkeypatch):
     heard = []
 
-    async def talk(text, *, spoken=False, named=True, turn_id=None):
+    async def talk(text, *, spoken=False, named=True, turn_id=None, continues=""):
         heard.append((text, spoken, named))
 
     monkeypatch.setattr(runtime, "talk", talk)
@@ -297,6 +303,114 @@ def test_the_ear_says_whether_a_message_began_with_the_name(runtime, monkeypatch
 
     asyncio.run(scene())
     assert heard == [("And tomorrow?", True, False)]
+
+
+def _cut_off(runtime, monkeypatch, first_answer: str = "", sentences: str = ""):
+    """A model that works on the first message until it is interrupted (having said ``sentences`` of its answer by
+    then), and answers every other one at once. Gives what it was asked: (words, by name, how it goes on)."""
+    asked, stopped = [], asyncio.Event()
+
+    async def talk(text, *, spoken=False, named=True, continues="", on_step=None, on_text=None, on_tool=None):
+        asked.append((text, named, continues))
+        if len(asked) > 1:
+            return Answer("Sent, with you in copy.", [], 0.1)
+        if sentences:
+            on_text(sentences)
+        await stopped.wait()
+        return Answer(first_answer, [], 0.1)
+
+    async def interrupt():
+        if asked:  # not the one every message begins with
+            stopped.set()
+
+    monkeypatch.setattr(runtime.core, "talk", talk)
+    monkeypatch.setattr(runtime.core, "interrupt", interrupt)
+    monkeypatch.setattr(runtime, "warm_voice", lambda: None)  # no model is loaded in the tests, nor the voice
+    return asked
+
+
+async def _goes_on(runtime, rest: str) -> list[dict]:
+    """The user asks something by name, the ear takes a pause for its end, and the user goes on with ``rest``."""
+    queue = runtime.hub.join()
+    runtime.ear.by_name, runtime.ear.continues = True, False
+    runtime._heard_by_ear("Send the deck to the team")
+    await asyncio.sleep(0.02)
+    runtime.ear.continues = True  # as the ear sets it when it begins to take the rest
+    runtime.heard_starting()
+    await asyncio.sleep(0.02)
+    runtime.ear.by_name = False
+    runtime._heard_by_ear(rest)
+    await asyncio.sleep(0.05)
+    return _events(queue)
+
+
+def test_the_rest_of_a_message_the_ear_cut_off_is_answered_with_it_as_one(runtime, monkeypatch):
+    asked = _cut_off(runtime, monkeypatch)
+    events = asyncio.run(_goes_on(runtime, "and copy me in"))
+    assert asked == [("Send the deck to the team", True, ""), ("Send the deck to the team and copy me in", True, "whole")]
+    replies = [event for event in events if event["type"] == "reply"]
+    assert [reply.get("ignored", False) for reply in replies] == [True, False]  # the cut-off one is taken back at once
+    assert replies[1]["text"] == "Sent, with you in copy."
+    assert [line["text"] for line in runtime.conversation if line["role"] == "user"] == [
+        "Send the deck to the team and copy me in"]
+    assert not [event for event in events if event["type"] == "reply_error"]
+
+
+def test_the_rest_that_comes_to_nothing_leaves_the_message_to_be_answered_as_it_was(runtime, monkeypatch):
+    asked = _cut_off(runtime, monkeypatch)
+    asyncio.run(_goes_on(runtime, ""))
+    assert asked[1] == ("Send the deck to the team", True, "whole")
+
+
+def test_stop_as_the_rest_gives_the_message_up(runtime, monkeypatch):
+    asked = _cut_off(runtime, monkeypatch)
+    events = asyncio.run(_goes_on(runtime, "Stop, stop"))
+    assert asked == [("Send the deck to the team", True, "")]  # the cut-off one was the last the model saw
+    assert len(_said(events)) == 1  # "On it." to the cut-off one, and then nothing
+    assert [line["text"] for line in runtime.conversation] == ["Stop, stop"]
+
+
+def test_a_rest_that_never_came_does_not_join_a_later_message(runtime, monkeypatch):
+    asked = _cut_off(runtime, monkeypatch)
+    monkeypatch.setattr(runtime_module, "REST_SECONDS", 0.0)
+
+    async def scene():
+        runtime.ear.by_name, runtime.ear.continues = True, False
+        runtime._heard_by_ear("Send the deck to the team")
+        await asyncio.sleep(0.02)
+        runtime.ear.continues = True
+        runtime.heard_starting()  # the rest begins, and the ear lets it go (a call starts, say)
+        await asyncio.sleep(0.02)
+        runtime.ear.continues = False  # the next message, by name, a while later
+        runtime._heard_by_ear("What time is it?")
+        await asyncio.sleep(0.05)
+
+    asyncio.run(scene())
+    assert asked[1] == ("What time is it?", True, "")
+
+
+def test_once_his_answer_is_being_said_the_rest_is_words_said_straight_after_it(runtime, monkeypatch):
+    asked = _cut_off(runtime, monkeypatch, first_answer="Which team? Sales or support?",
+                     sentences="Which team? Sales or support?")
+    asyncio.run(_goes_on(runtime, "the sales team"))
+    assert asked[1] == ("the sales team", False, "went on")
+
+
+def test_his_own_line_while_he_works_is_not_the_end_of_his_answer(runtime, monkeypatch):
+    told = []
+    monkeypatch.setattr(runtime.ear, "speaking_paused", lambda: told.append("paused"))
+    monkeypatch.setattr(runtime.ear, "speaking_ended", lambda: told.append("ended"))
+
+    async def talk(text, *, spoken=False, named=True, continues="", on_step=None, on_text=None, on_tool=None):
+        turn = runtime._speaking_turn
+        runtime.speaking(turn, False)  # "Right, checking." has been heard; the answer is still being worked on
+        on_text("You have two meetings tomorrow. The first is at ten.")
+        runtime.speaking(turn, False)  # ...and now a sentence of the answer itself
+        return Answer("You have two meetings tomorrow. The first is at ten.", [], 0.1)
+
+    monkeypatch.setattr(runtime.core, "talk", talk)
+    asyncio.run(runtime.talk("What's on my calendar tomorrow?", spoken=True))
+    assert told == ["paused", "ended"]
 
 
 # --- the model's side ---------------------------------------------------------------

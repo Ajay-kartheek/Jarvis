@@ -54,6 +54,7 @@ PROGRESS_LINES = 2
 SPOKEN_CHARS_PER_SECOND = 14
 MIND_EVERY_SECONDS = 0.5
 LINES_AFTER_SECONDS = 90  # Jarvis's own short lines are made in the cloud voice this long after a start
+REST_SECONDS = 40.0  # the rest of a message the ear cut off comes within this long, or it is not its rest
 MODEL_IDLE_SECONDS = 600  # the speaking voice is freed after this long unused
 # The recogniser (1.5 GB) is freed after this long unused. With the ear on, any voice nearby loads it again, and that
 # takes well under a second, started as the voice begins: the first wake after it was freed came no later than any
@@ -340,6 +341,13 @@ class Runtime:
         self._voice_credits: dict | None = None
         self._pairs: tuple[float, dict[str, str]] = (float("-inf"), {})  # how names are said, and when it was read
         self._speaking_turn: str | None = None  # the reply being written and spoken as it comes
+        self._speaker: _Speaker | None = None  # ...and what speaks it
+        # The spoken message being answered, until its answer is shown: (turn, words, by name, when it began). The rest
+        # of it, should the ear have cut it off, takes its place (``_take_back``) and comes after its words (``_before``:
+        # words, by name, when it was taken back).
+        self._unanswered: tuple[str, str, bool, float] | None = None
+        self._before: tuple[str, bool, float] | None = None
+        self._taken_back: set[str] = set()  # turns given up that way, whose answers are never shown or said
         self._spoke_at = 0.0  # when the user last spoke to Jarvis, and when Jarvis last made a sound
         self._sounded_at = 0.0
         self._folders_due = False
@@ -437,14 +445,25 @@ class Runtime:
             return vocabulary.words(store, self.config)
 
     def _heard_by_ear(self, text: str) -> None:
-        """A message the ear took: Jarvis answers it as he would a held-key one."""
-        self.spawn(self._answer_spoken(text, self.ear.by_name))
+        """A message the ear took: Jarvis answers it as he would a held-key one. The rest of a message the ear cut off
+        is answered together with it: as the whole message, in place of the cut-off one, if nothing of its answer had
+        been said (see :meth:`heard_starting`); else as words said straight after it."""
+        named, continues = self.ear.by_name, ""
+        before, self._before = self._before, None
+        if before is not None and time.monotonic() - before[2] > REST_SECONDS:
+            before = None  # the rest never came (the ear let it go for a call, say): this is a message of its own
+        if before is not None and manner.ending(text) is None:  # "stop" as the rest gives the message up
+            text, named, continues = f"{before[0]} {text}".strip(), before[1], "whole"
+        elif self.ear.continues and before is None:
+            continues = "went on"
+        if text:
+            self.spawn(self._answer_spoken(text, named, continues))
 
-    async def _answer_spoken(self, text: str, named: bool) -> None:
+    async def _answer_spoken(self, text: str, named: bool, continues: str = "") -> None:
         from jarvis.agents import AgentError
 
         try:
-            await self.talk(text, spoken=True, named=named)
+            await self.talk(text, spoken=True, named=named, continues=continues)
         except AgentError:
             pass  # already shown as the turn's error
 
@@ -461,6 +480,8 @@ class Runtime:
         self._voice_playing = playing
         if playing:
             self.ear.speaking_started()
+        elif speech_id == self._speaking_turn and self._speaker is not None and not self._speaker.answering:
+            self.ear.speaking_paused()  # only a line of his own so far ("On it."): the answer is still to come
         else:
             self.ear.speaking_ended()
 
@@ -560,9 +581,26 @@ class Runtime:
             self._hushed = cut
 
     def heard_starting(self) -> None:
-        """The user began a spoken message, by the key or by Jarvis's name: he stops talking and gets ready."""
+        """The user began a spoken message, by the key or by Jarvis's name: he stops talking and gets ready. When it is
+        the rest of a message the ear took for finished too soon, that one is taken back at once if nothing of its
+        answer has been said: the two are answered as one when this one ends."""
+        if self.ear.continues:
+            self._take_back()
         self.hush()
         self.warm_voice()
+
+    def _take_back(self) -> None:
+        """Give up answering the spoken message the user has just gone on with, unless its answer is being said: its line
+        goes from the conversation, what was begun of its answer is never shown or said, and its words wait in
+        ``_before`` for the rest."""
+        cut, self._unanswered, self._before = self._unanswered, None, None
+        if cut is None or (self._speaker is not None and self._speaker.answering):
+            return
+        turn_id, text, named, started = cut
+        self._taken_back.add(turn_id)
+        self._before = (text, named, time.monotonic())
+        self._withdraw(turn_id, text, started)
+        self.spawn(self.core.interrupt())
 
     def warm_voice(self) -> None:
         """The user has started talking: get the conversation and the speaking voice ready while they do."""
@@ -664,12 +702,14 @@ class Runtime:
                 self._speak(speech_id, seq, sentence)
         self.publish_state()
 
-    async def talk(self, text: str, *, spoken: bool = False, named: bool = True, turn_id: str | None = None) -> dict:
+    async def talk(self, text: str, *, spoken: bool = False, named: bool = True, turn_id: str | None = None,
+                   continues: str = "") -> dict:
         """One message from the user and Jarvis's reply. Raises AgentError if no reply could be made.
 
         ``named``: a spoken message began with Jarvis's name. One the ear took without it, in a conversation, may have
         been meant for someone else in the room; when the model says so, Jarvis says nothing and the conversation
-        ends.
+        ends. ``continues``: how a spoken message goes on from the last one, which the ear had cut off: "whole" (it is
+        all of that one) or "went on" (it was said straight after it).
         """
         from jarvis.agents import AgentError
 
@@ -689,13 +729,17 @@ class Runtime:
         if settled is not None:
             return self._replied(turn_id, "Going ahead." if settled.granted else "Cancelled.")
 
-        # "That's all", "thanks", "stop": the conversation is over, and Jarvis says so at once, without a model.
+        # "That's all", "thanks": the conversation is over, and Jarvis says so at once, without a model. "Stop": he says
+        # nothing, and listens for what the user says next, as after an answer.
         ending = manner.ending(text) if spoken else None
         if ending is not None:
             await self.core.interrupt()
-            self.ear.end_conversation()
-            if speaker and ending:
-                speaker.line(ending)
+            if ending:
+                self.ear.end_conversation()
+                if speaker:
+                    speaker.line(ending)
+            else:
+                self.ear.speaking_ended()
             return self._replied(turn_id, ending, speak=bool(speaker and ending))
 
         if speaker and named and manner.needs_work(text):
@@ -716,14 +760,17 @@ class Runtime:
         await self.core.interrupt()
         working = self.spawn(self._show_busy())
         minding = self.spawn(speaker.mind()) if speaker else None
-        self._speaking_turn = turn_id if speaker else None
+        self._speaking_turn, self._speaker = (turn_id, speaker) if speaker else (None, None)
+        self._unanswered = (turn_id, text, named, started) if spoken else None
         try:
             try:
                 answer = await self.core.talk(
-                    text, spoken=spoken, named=named, on_text=on_text, on_tool=on_tool,
+                    text, spoken=spoken, named=named, continues=continues, on_text=on_text, on_tool=on_tool,
                     on_step=lambda step: self.hub.publish({"type": "step", "id": turn_id, "text": step[:160]}),
                 )
             except AgentError as exc:
+                if turn_id in self._taken_back:
+                    return self._given_up(turn_id)
                 self.hub.publish({"type": "reply_error", "id": turn_id, "text": str(exc)})
                 raise
             finally:
@@ -731,13 +778,17 @@ class Runtime:
                     if task is not None:
                         task.cancel()
                 self.publish_state()
+            if turn_id in self._taken_back:
+                return self._given_up(turn_id)
             if manner.not_for_me(answer.text):
                 return self._not_for_me(turn_id, text, started)
             if speaker:
                 speaker.finish(answer.text)
         finally:
             if self._speaking_turn == turn_id:
-                self._speaking_turn = None
+                self._speaking_turn, self._speaker = None, None
+            if self._unanswered and self._unanswered[0] == turn_id:
+                self._unanswered = None
         reply = {
             "id": turn_id, "text": answer.text, "speak": aloud,
             "seconds": round(time.monotonic() - started, 1), "at": now_iso(),
@@ -760,6 +811,11 @@ class Runtime:
         """A message the ear took without Jarvis's name was meant for someone else: it is taken back, nothing is said,
         and only the name starts a conversation again."""
         self.ear.end_conversation()
+        return self._withdraw(turn_id, text, started)
+
+    def _withdraw(self, turn_id: str, text: str, started: float) -> dict:
+        """Take the turn ``turn_id`` back: the user's line ``text`` goes from the conversation, and its reply is empty
+        and marked ``ignored``, which tells the page to drop both."""
         if self.conversation and self.conversation[-1]["role"] == "user" and self.conversation[-1]["text"] == text:
             self.conversation.pop()
         reply = {
@@ -769,6 +825,13 @@ class Runtime:
         self.hub.publish({"type": "reply", **reply})
         self.publish_state()
         return {**reply, "web_queries": [], "drafts": []}
+
+    def _given_up(self, turn_id: str) -> dict:
+        """What a turn taken back for the whole of its message comes to, once its model has stopped: nothing more, as
+        it was withdrawn already."""
+        self._taken_back.discard(turn_id)
+        return {"id": turn_id, "text": "", "speak": False, "seconds": 0.0, "at": now_iso(), "ignored": True,
+                "web_queries": [], "drafts": []}
 
     async def _show_busy(self) -> None:
         await asyncio.sleep(0)  # by now the conversation's lock is taken
@@ -1255,6 +1318,11 @@ class _Speaker:
         self._heard_by = time.monotonic()  # when what has been said will have been heard
         self._tool: str | None = None  # the tool the reply is waiting for
         self._progress = 0  # words on what he is doing, said so far
+
+    @property
+    def answering(self) -> bool:
+        """Whether a sentence of the reply itself has been said, beyond Jarvis's own lines."""
+        return self._sentences > 0
 
     def _say(self, text: str, keep: bool = False) -> bool:
         if not self._runtime._speak(self._id, self._seq, text, keep=keep):

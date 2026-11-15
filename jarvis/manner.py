@@ -92,10 +92,10 @@ _ENDS = re.compile(
     rf"we're done|i'm good|we're good|all good|stop listening|go to sleep|goodbye|good bye|bye(?: bye)?|"
     rf"good ?night|see you(?: later)?|never ?mind|{_THANKS})(?:\s+(?:for now|{_THANKS}|bye))*$"
 )
-# ...or wanting him to be quiet: no answer at all.
-_STOP = re.compile(
-    rf"^(?:{_FILLER}\s+)*(?:stop|stop it|stop talking|be quiet|quiet|shush|hush|enough|that's enough)(?:\s+(?:now|please))*$"
-)
+# ...or wanting him to be quiet: no answer at all. Said once or over and over ("Stop, stop, stop"), the last time
+# perhaps cut off ("Stop, stop, st").
+_HUSH = r"(?:stop|stop it|stop talking|be quiet|quiet|shush|hush|enough|that's enough|wait|hold on)"
+_STOP = re.compile(rf"^(?:{_FILLER}\s+)*{_HUSH}(?:\s+(?:{_HUSH}|now|please))*(?:\s+(?:st|sto|wa|wai|ho|hol))?$")
 
 _said: collections.Counter = collections.Counter()  # how many times each kind of line has been said, to take turns
 
@@ -130,7 +130,8 @@ def is_preamble(sentence: str) -> bool:
 
 
 def ending(message: str) -> str | None:
-    """If the spoken ``message`` ends the conversation, what Jarvis says to that ("" for nothing at all); else None."""
+    """What Jarvis says to a spoken ``message`` that ends the conversation ("That's all."), or "" to one that only wants
+    him quiet (he says nothing, and listens on for what the user says next); None for any other."""
     words = _plain(message)
     if _STOP.match(words):
         return ""

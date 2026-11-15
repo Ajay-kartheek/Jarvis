@@ -212,6 +212,8 @@ class World:
         self.ear = ear.Ear(self._publish, self._on_message, on_listening=self._on_listening)
         self.finished: FakeFinished | None = None  # the turn model; without it a message ends after a fixed pause
         self.by_name: list[bool] = []  # what the ear said of each message as it was handed on
+        self.continued: list[bool] = []  # ...and whether it was the rest of the one before
+        self.continuing: list[bool] = []  # what the ear said of that as each message began
         monkeypatch.setattr(ear, "_load", self._load)
         monkeypatch.setattr(ear, "_finished", lambda: self.finished)
         monkeypatch.setattr(ear, "_utterance", FakeUtterance)
@@ -291,9 +293,11 @@ class World:
         self.events.append((round(self.clock, 2), {"type": "message", "text": text}))
         self.messages.append(text)
         self.by_name.append(self.ear.by_name)
+        self.continued.append(self.ear.continues)
 
     def _on_listening(self) -> None:
         self.listening += 1
+        self.continuing.append(self.ear.continues)
 
     async def settle(self, threads: bool = False) -> None:
         """Let the ear finish with the sound it has been sent."""
@@ -573,13 +577,34 @@ def test_without_the_turn_model_the_message_ends_about_a_second_after_the_user_s
     assert ear.END_SECONDS <= world.when("voice", "heard")[0] - stopped <= ear.END_SECONDS + 0.2
 
 
-def test_a_finished_message_ends_as_soon_as_the_turn_model_says_so(world):
+def test_a_finished_message_ends_half_a_second_into_the_quiet_once_the_turn_model_says_so(world):
     world.finished = FakeFinished()
     world.play(quiet(1), call(), quiet(0.5), words("what time is it?"), quiet(3), frame=ear.FRAME)
     stopped = 1 + 0.5 + 0.5 + 1.0
     assert world.messages == ["What time is it?"]
-    assert ear.ASK_SECONDS <= world.when("voice", "heard")[0] - stopped <= ear.ASK_SECONDS + 0.12
-    assert len(world.finished.heard) == 1
+    waited = world.when("voice", "heard")[0] - stopped
+    assert ear.SHORTEST_PAUSE_SECONDS <= waited <= ear.SHORTEST_PAUSE_SECONDS + 0.12
+    assert len(world.finished.heard) == 1  # asked once, at the first moment of quiet
+    assert np.count_nonzero(world.finished.heard[0][-int(0.5 * RATE):] == np.float32(QUIET)) < ear.ASK_SECONDS * RATE + ear.FRAME
+
+
+def test_a_gap_shorter_than_the_shortest_pause_never_ends_a_message_however_finished_it_sounds(world):
+    world.finished = FakeFinished()
+    world.play(quiet(1), call(), words("stop."), quiet(0.3), words("stop."), quiet(0.3), words("stop."), quiet(3),
+               frame=ear.FRAME)
+    assert world.messages == ["Stop. stop. stop."]
+
+
+def test_words_no_sentence_ends_on_keep_the_message_open_whatever_the_turn_model_says(world, monkeypatch):
+    world.finished = FakeFinished()
+    monkeypatch.setattr(world.finished, "chance", lambda samples: 0.99)  # sure it is finished, every time
+    world.play(quiet(1), call(), words("send an email to"), quiet(1.2), words("someone at example.c"), quiet(1.0),
+               words("om saying the deck is ready."), quiet(3), frame=ear.FRAME)
+    assert world.messages == ["Send an email to someone at example.c om saying the deck is ready."]
+    for left in ("the budget, and", "milk, eggs,", "in my uh"):
+        assert ear._UNFINISHED.search(left), left
+    for finished in ("Who is it for?", "Send it to Ravi.", "Okay, okay", "shellfish.com"):
+        assert not ear._UNFINISHED.search(finished), finished
 
 
 def test_a_pause_in_mid_thought_does_not_end_the_message_and_the_next_pause_is_asked_about_again(world):
@@ -910,6 +935,74 @@ def test_a_long_spoken_answer_keeps_the_ear_awake_until_it_is_over(world):
                quiet(1), words("thank you"), quiet(2))
     assert world.messages == ["Read me the brief", "Thank you"]
     assert ASLEEP not in world.told()[1:]
+
+
+# --- the rest of a message, and his own lines while he works ----------------------
+
+
+def test_the_user_going_on_right_after_a_message_ended_is_the_rest_of_it(world):
+    world.finished = FakeFinished()
+    world.play(quiet(1), call(), words("send the deck to the team."), quiet(1.2), words("and copy me in."), quiet(3),
+               frame=ear.FRAME)
+    assert world.messages == ["Send the deck to the team.", "And copy me in."]
+    assert world.continuing == [False, True] and world.continued == [False, True]  # said as it begins, and at its end
+    assert world.by_name == [True, False]
+
+
+def test_the_rest_of_a_message_that_comes_to_nothing_is_handed_on_empty_so_the_message_stands(world):
+    cough = np.full(int(0.3 * RATE), COUGH, dtype=np.float32)  # a voice to the voice model, no words to the recogniser
+    world.finished = FakeFinished()
+    world.play(quiet(1), call(), words("what time is it?"), quiet(1.0), cough, quiet(3), frame=ear.FRAME)
+    assert world.messages == ["What time is it?", ""] and world.continued == [False, True]
+    assert ("voice", "heard", "") not in world.told()
+
+
+def test_after_two_seconds_talk_without_the_name_is_not_taken_while_the_answer_is_waited_for(world):
+    world.finished = FakeFinished()
+    world.play(quiet(1), call(), words("what time is it?"), quiet(ear.CONTINUE_SECONDS + 1), words("is it raining?"),
+               quiet(3), frame=ear.FRAME)
+    assert world.messages == ["What time is it?"]
+
+
+def test_a_line_of_his_own_while_he_works_opens_no_follow_up_time(world):
+    world.play(quiet(1), call(), words("check my inbox"), quiet(1.5), world.ear.speaking_started, jarvis(0.6),
+               world.ear.speaking_paused, quiet(3), words("can you pass the charger"), quiet(2),
+               *answered(world), quiet(1), words("thanks"), quiet(2), frame=ear.FRAME)
+    assert world.messages == ["Check my inbox", "Thanks"]
+
+
+def test_while_he_works_his_name_still_wakes_the_ear(world):
+    world.play(quiet(1), call(), words("check my inbox"), quiet(1.5), world.ear.speaking_started, jarvis(0.6),
+               world.ear.speaking_paused, quiet(3), call(), words("never mind"), quiet(2), frame=ear.FRAME)
+    assert world.messages == ["Check my inbox", "Never mind"] and world.by_name == [True, True]
+
+
+def test_through_headphones_the_user_can_go_on_over_his_line_right_after_a_message(world):
+    world.ear.headphones = True
+    world.finished = FakeFinished()
+    socket = world.play(quiet(1), call(), words("send the deck to the team."), quiet(0.7), world.ear.speaking_started,
+                        quiet(0.3), words("and copy me in."), quiet(0.6), world.ear.speaking_paused, quiet(3),
+                        frame=ear.FRAME)
+    assert socket.sent == [HUSH]
+    assert world.messages == ["Send the deck to the team.", "And copy me in."] and world.continued == [False, True]
+
+
+def test_a_held_key_message_right_after_one_the_ear_took_is_never_the_rest_of_it(world):
+    world.finished = FakeFinished()
+    seen = []
+    world.play(quiet(1), call(), words("send the deck."), quiet(0.7), words("and copy me in."), quiet(0.6),
+               lambda: seen.append(world.ear.continues), lambda: world.ear.pause("message"),
+               lambda: seen.append(world.ear.continues), quiet(1), lambda: world.ear.resume("message"),
+               quiet(0.5), words("and tomorrow?"), quiet(3), frame=ear.FRAME)
+    assert seen == [True, False] and world.messages == ["Send the deck.", "And copy me in."]
+
+
+def test_through_headphones_talk_over_his_answer_later_on_still_needs_the_name(world):
+    world.ear.headphones = True
+    socket = world.play(quiet(1), call(), words("what time is it?"), quiet(4), world.ear.speaking_started, quiet(1),
+                        words("wait what about the budget"), quiet(1), world.ear.speaking_ended, quiet(9),
+                        frame=ear.FRAME)
+    assert socket.sent == [] and world.messages == ["What time is it?"]
 
 
 # --- whether a message was meant for Jarvis, and the end of a conversation ------

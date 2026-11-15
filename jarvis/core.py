@@ -94,11 +94,14 @@ def wants_send(message: str) -> bool:
     return bool(_SEND_WORDS.search(message))
 
 
-def stamp(message: str, spoken: bool = False, named: bool = True) -> str:
+def stamp(message: str, spoken: bool = False, named: bool = True, continues: str = "") -> str:
     """The user's words as the model gets them: when, and how they came (spoken without Jarvis's name: in a
-    conversation, and perhaps not meant for him)."""
+    conversation, and perhaps not meant for him). ``continues``: "whole" for the whole of the last spoken message,
+    which the ear had cut off before the user finished, or "went on" for words said straight after it."""
     now = datetime.now().astimezone()
     how = ("spoken" if named else "spoken, no name") if spoken else "typed"
+    if spoken and continues:
+        how += f", {continues}"
     return f"[{now:%A %d %B %Y, %H:%M} {now.tzname()}] [{how}] {message}"
 
 
@@ -140,9 +143,10 @@ How you answer
 
 How you sound
 - Calm, precise and quietly confident, with a dry wit used sparingly: the trusted aide who has worked with them for years. Warm, never gushing. No filler ("Great question", "Certainly!", "I hope this helps"), no long apologies, and no repeating their question back to them.
-- A spoken message is answered aloud, so write the reply the way you would say it: short sentences, usually one to three, the answer first and detail only where it matters. No lists, brackets or symbols. Times as people say them ("half past three", "quarter to eleven", "at four"), days rather than dates within the next week or so ("tomorrow at ten", "on Thursday"), and round numbers where exactness does not matter. Call people by their first names.
+- A spoken message is answered aloud, so write the reply the way you would say it: short sentences, usually one to three, the answer first and detail only where it matters. Answer what was asked and stop: no news, offers or reminders nobody asked for ("Can you hear me?" is answered "Yes, I can."). No lists, brackets or symbols. Times as people say them ("half past three", "quarter to eleven", "at four"), days rather than dates within the next week or so ("tomorrow at ten", "on Thursday"), and round numbers where exactness does not matter. Call people by their first names.
 - Do not announce what you are about to do ("Let me check", "I'll look into that"). When a spoken request takes a moment, a short line such as "Right, checking." has already been said for you; begin with what you found or did. On a long job the user hears a word of progress without your help.
 - In a spoken conversation the user does not repeat your name. A message marked [spoken, no name] was heard just after you spoke, without your name. Usually it is meant for you. When it plainly is not (they are talking to someone else in the room, or it is a stray fragment that makes no sense said to you), reply with exactly {manner.NOT_FOR_ME} and nothing else: it is never shown or said, and you stop listening until your name is said.
+- Now and then a pause cuts a spoken message off before the user has finished. A message whose mark ends in "whole" ([spoken, whole]) is then the whole of the last one, heard to its end: answer it as it stands, and leave aside the cut-off one and anything you began for it, which was never shown or said. One whose mark ends in "went on" was said straight after the last one: read the two together as one.
 
 Where to look
 - Anything about the latest or new mail, or a change to today's calendar: call refresh first. The local copy is otherwise a few minutes behind.
@@ -199,6 +203,8 @@ class Core:
         self._asked: list[tuple[float, str]] = []  # the user's latest messages (monotonic time, words): see ASKED_SECONDS
         self._answering = False  # a message is being answered (see interrupt)
         self._interrupted = False
+        self._starting = False  # ...or has the conversation, and is about to be
+        self._skipped = False  # ...and was cut short before it began
         self._sending: set[str] = set()  # Gmail ids of drafts whose mail is on a card waiting for the user's yes
         self._drafts: list[dict] = []
         self._web_asked: list[str] = []
@@ -892,7 +898,11 @@ class Core:
         return final.strip()
 
     async def interrupt(self) -> None:
-        """Cut short the answer being written, if there is one: the user has moved on to something else."""
+        """Cut short the answer being written, if there is one: the user has moved on to something else. A message
+        about to be answered (the conversation still opening, say) is not answered at all."""
+        if self._starting:
+            self._skipped = True
+            return
         if not self._answering or self._client is None:
             return
         self._interrupted = True
@@ -910,18 +920,25 @@ class Core:
         self._may_send = any(wants_send(words) for _, words in self._asked)
         self._message = message
 
-    async def talk(self, message: str, *, spoken: bool = False, named: bool = True, on_step: Step | None = None,
-                   on_text: Text | None = None, on_tool: Tool | None = None) -> Answer:
+    async def talk(self, message: str, *, spoken: bool = False, named: bool = True, continues: str = "",
+                   on_step: Step | None = None, on_text: Text | None = None, on_tool: Tool | None = None) -> Answer:
         """Answer one message. ``on_step`` hears what is being done; ``on_text`` the reply so far; ``on_tool`` the name
-        of each tool as the model begins to use it. ``named``: a spoken message began with Jarvis's name."""
+        of each tool as the model begins to use it. ``named``: a spoken message began with Jarvis's name;
+        ``continues``: how it goes on from the last one (see :func:`stamp`)."""
         started = time.monotonic()
         async with self._lock:
+            self._starting, self._skipped = True, False
             try:
                 await self._ensure()
+                if self._skipped:
+                    return Answer("", [], time.monotonic() - started)
+                self._starting = False
                 self._hear(message)
                 self._drafts, self._web_asked, self._step = [], [], on_step
                 self._messages += 1
-                text = await self._turn(self._header() + stamp(message, spoken, named), on_step, on_text, on_tool)
+                text = await self._turn(
+                    self._header() + stamp(message, spoken, named, continues), on_step, on_text, on_tool,
+                )
                 answer = Answer(text, list(self._web_asked), time.monotonic() - started)
                 answer.drafts = list(self._drafts)
                 return answer
@@ -931,6 +948,7 @@ class Core:
                 await self._close()
                 raise AgentError(f"Jarvis could not answer: {type(exc).__name__}: {exc}") from None
             finally:
+                self._starting = False
                 self._step = None
                 self._last_used = time.monotonic()
 

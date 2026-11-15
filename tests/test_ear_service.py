@@ -217,7 +217,7 @@ def test_what_the_ear_takes_is_answered_like_a_spoken_message(fake_home):
         runtime = Runtime(load_config())
         said = []
 
-        async def talk(text, *, spoken=False, named=True, turn_id=None):
+        async def talk(text, *, spoken=False, named=True, turn_id=None, continues=""):
             said.append((text, spoken, named))
             if len(said) == 2:
                 raise AgentError("Claude could not be reached")  # shown as the turn's error, nothing more
