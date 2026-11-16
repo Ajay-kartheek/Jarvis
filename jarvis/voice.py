@@ -81,11 +81,12 @@ async def _hear(websocket, runtime: "Runtime") -> None:
 
     hub = runtime.hub
     hub.publish({"type": "voice", "phase": "listening"})
-    runtime.heard_starting()  # he stops talking, and gets ready while the user speaks
+    runtime.warm_voice()  # gets ready while the user speaks
     loading = asyncio.create_task(asyncio.to_thread(_ready, runtime.config))
     utterance: Utterance | None = None
     waiting: list[np.ndarray] = []  # audio that arrived before the model was ready
     samples_heard = 0
+    started = False  # the user is talking: he has stopped, and the answer he was working on with him
     cancelled = False
     shown = ""
     last_level = 0.0
@@ -109,6 +110,11 @@ async def _hear(websocket, runtime: "Runtime") -> None:
             if not len(chunk):
                 continue
             samples_heard += len(chunk)
+            if not started and samples_heard >= MIN_SECONDS * SAMPLE_RATE:
+                # A hold this long is the user talking. A shorter one, a slip of the finger just after asking,
+                # leaves the answer that is on its way alone.
+                started = True
+                runtime.heard_starting()
             now = time.monotonic()
             if now - last_level >= LEVEL_EVERY_SECONDS:
                 last_level = now

@@ -10,11 +10,12 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from jarvis import ear, install, voice
+from jarvis import ear, install, speech, voice
 from jarvis.config import load_config
 from jarvis.runtime import Runtime
 from jarvis.server import create_app
@@ -156,6 +157,49 @@ def test_a_held_key_message_closes_the_ear_until_it_is_over(client, monkeypatch)
             pass
     assert seen == [{"message"}, {"message"}]
     assert client.runtime.ear._paused == set()  # opened again, even after a message that failed
+
+
+class HeldKey:
+    """The app's end of a held-key message: ``seconds`` of sound, then the key goes up."""
+
+    def __init__(self, seconds: float) -> None:
+        self.chunks = [np.zeros(1600, dtype="<f4").tobytes() for _ in range(int(seconds * 10))]
+
+    async def receive(self) -> dict:
+        if self.chunks:
+            return {"type": "websocket.receive", "bytes": self.chunks.pop(0)}
+        return {"type": "websocket.disconnect"}
+
+
+def test_a_slip_of_the_finger_on_the_key_leaves_the_answer_on_its_way_alone(fake_home, monkeypatch):
+    class Words:
+        def __init__(self, *args):
+            pass
+
+        def add(self, samples):
+            pass
+
+        def step(self):
+            return ""
+
+        def finish(self):
+            return "draft a mail to Ravi"
+
+    monkeypatch.setattr(voice, "_ready", lambda config: (object(), None))
+    monkeypatch.setattr(voice, "Utterance", Words)
+    monkeypatch.setattr(speech, "release", lambda: None)
+
+    async def scene(seconds: float) -> list[str]:
+        runtime = Runtime(load_config())
+        done = []
+        monkeypatch.setattr(runtime, "warm_voice", lambda: done.append("ready"))
+        monkeypatch.setattr(runtime, "heard_starting", lambda: done.append("stopped him"))
+        monkeypatch.setattr(runtime, "spawn", lambda work: work.close() or done.append("answered"))
+        await voice._hear(HeldKey(seconds), runtime)
+        return done
+
+    assert asyncio.run(scene(0.2)) == ["ready"]  # nothing is stopped, and nothing is answered
+    assert asyncio.run(scene(1.0)) == ["ready", "stopped him", "answered"]
 
 
 def test_a_call_closes_the_ear_at_once_and_its_end_opens_it_again(client):

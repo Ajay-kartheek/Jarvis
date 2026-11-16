@@ -110,10 +110,12 @@ def test_a_request_to_draft_holds_for_the_answers_that_follow_it(talking):
 
 def test_a_request_to_send_holds_for_a_few_messages_only(talking):
     talking._hear("Can you send out a mail to Ravi?", now=1000.0)
-    for second, words in enumerate(["Hi, this is a test, with the subject Testing.", "Yes.", "Fine."], start=1):
+    answers = ["Yeah.", "It's just a hi.", "At example.com.", "Ravi.k at example.com.", "Yes.", "Fine.", "Go on."]
+    assert len(answers) == core.ASKED_MESSAGES - 1
+    for second, words in enumerate(answers, start=1):
         talking._hear(words, now=1000.0 + second)
-        assert talking._may_draft and talking._may_send
-    talking._hear("When is the rehearsal?", now=1005.0)
+        assert talking._may_draft and talking._may_send, words
+    talking._hear("When is the rehearsal?", now=1010.0)
     assert not talking._may_draft and not talking._may_send
 
 

@@ -79,6 +79,19 @@ def test_each_word_says_where_it_came_from_and_the_plain_list_is_the_same_words_
     assert {source for _, source in found} == {"person", "engagement", "dossier", "taught", "common"}
 
 
+def test_the_users_own_organisation_is_listened_for_by_the_name_of_their_mail_domain(store):
+    from dataclasses import replace
+
+    from jarvis.config import Account
+
+    config = replace(load_config(), accounts=(
+        Account("me@acme.io", primary=True), Account("me.too@gmail.com"), Account("x@mail.acme.io"),
+        Account("you@example.com"), Account("me@beta.co.in"),
+    ))
+    assert vocabulary.organisations(config) == ["Acme", "Beta"]
+    assert vocabulary.sourced(store, config)[0] == ("Acme", "organisation")
+
+
 def test_how_names_are_said_is_kept_changed_in_place_and_dropped(store):
     assert vocabulary.pronunciations(store) == {}
     vocabulary.pronounce(store, "Zelmora  Quill", "Zel-mora Kwill")

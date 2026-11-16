@@ -1028,12 +1028,20 @@ def test_a_held_key_message_right_after_one_the_ear_took_is_never_the_rest_of_it
     assert seen == [True, False] and world.messages == ["Send the deck.", "And copy me in."]
 
 
-def test_through_headphones_talk_over_his_answer_later_on_still_needs_the_name(world):
+def test_through_headphones_the_user_can_answer_his_question_before_he_has_finished(world):
     world.ear.headphones = True
     socket = world.play(quiet(1), call(), words("what time is it?"), quiet(4), world.ear.speaking_started, quiet(1),
-                        words("wait what about the budget"), quiet(1), world.ear.speaking_ended, quiet(9),
+                        words("ravi at example.com"), quiet(1), world.ear.speaking_ended, quiet(9),
                         frame=ear.FRAME)
-    assert socket.sent == [] and world.messages == ["What time is it?"]
+    assert socket.sent == [HUSH] and world.messages == ["What time is it?", "Ravi at example.com"]
+    assert world.continued == [False, False]  # long after the message: an answer of its own
+
+
+def test_through_headphones_an_answer_begun_as_he_stops_is_taken_from_its_first_word(world):
+    world.ear.headphones = True
+    world.play(quiet(1), call(), words("what time is it?"), quiet(1.5), world.ear.speaking_started, quiet(2),
+               world.ear.speaking_ended, words("and tomorrow?"), quiet(2), frame=ear.FRAME)
+    assert world.messages == ["What time is it?", "And tomorrow?"]
 
 
 # --- whether a message was meant for Jarvis, and the end of a conversation ------

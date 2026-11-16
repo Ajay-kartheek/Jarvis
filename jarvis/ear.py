@@ -27,10 +27,11 @@ taken for the user beginning to speak. A line of his own while he works ("One mo
 no such time. While Jarvis himself is speaking only
 the name counts, which is how he is interrupted; his own voice, which the microphone hears as well, is never taken for
 a message. Through the speakers that means the name is heard when it follows a pause in what the microphone hears,
-between his sentences say; through headphones, at any time, and right after a message the user can go on over him.
+between his sentences say.
 
-Unless the app cancels his voice out of the microphone (it says so when it connects: ``echo=cancelled``). Then the
-user can simply talk over him: a quarter of a second of confident voice while he speaks stops him at once (the app
+Unless none of his voice reaches the microphone: he speaks into headphones, or the app cancels his voice out of the
+microphone (it says so when it connects: ``echo=cancelled``). Then the user can simply talk over him, to answer the
+question he has just asked, say: a quarter of a second of confident voice while he speaks stops him at once (the app
 is told ``{"type": "hush"}`` on the same connection, and the service is told through ``on_listening``) and is the
 start of the user's next message, name or not. What is left of his voice after cancelling was measured about 100 dB
 down, far below the level a voice must have to count; and a message that turns out to be mostly his own words, three
@@ -934,9 +935,10 @@ class Ear:
             self._enter(ASLEEP)
         elif not closing and self._phase in (ASLEEP, REPLYING, FOLLOW_UP):
             self._told += 1
-            self._deaf_until = self._received + int(ECHO_SECONDS * SAMPLE_RATE)
+            clean = self.headphones or self.cancelled  # nothing of his voice dies away in the microphone
+            self._deaf_until = self._received + (0 if clean else int(ECHO_SECONDS * SAMPLE_RATE))
             self._until = self._deaf_until + int(FOLLOW_UP_SECONDS * SAMPLE_RATE)
-            self._onset = _Onset(after_quiet=True)
+            self._onset = _Onset(after_quiet=not clean)  # an answer already begun is taken from where he stopped
             self._enter(FOLLOW_UP)
 
     def speaking_paused(self) -> None:
@@ -1081,7 +1083,7 @@ class Ear:
         if spotter is not None and spotter is self._spotter and self._spotted(spotter):
             return
         soon = phase == REPLYING and self._soon_after()
-        over_him = self.cancelled or (self.headphones and soon)  # none of his voice reaches the microphone
+        over_him = self.cancelled or self.headphones  # none of his voice reaches the microphone: talk over him stops him
         if self._speaking and over_him and phase in (ASLEEP, REPLYING) and self._heard > self._barge_from:
             if self._barge.heard(chances, frame):
                 self._barge_in()

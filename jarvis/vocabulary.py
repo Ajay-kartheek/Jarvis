@@ -89,14 +89,36 @@ def dossier_terms(name: str, limit: int = 30) -> list[str]:
     return terms[:limit]
 
 
+# Mail providers, and the domains kept for examples: a mail domain of theirs names no one's organisation.
+_PROVIDERS = {"gmail", "googlemail", "outlook", "hotmail", "live", "msn", "yahoo", "icloud", "me", "mac", "proton",
+              "protonmail", "pm", "aol", "zoho", "yandex", "gmx", "fastmail", "hey", "rediffmail", "example"}
+
+
+def organisations(config: Config) -> list[str]:
+    """The user's own organisations, by the names of their accounts' mail domains ("name@acme.io": "Acme").
+    The user says their company's name often, in addresses too, and the recogniser makes other words of a name it
+    has never heard."""
+    names: list[str] = []
+    for account in config.accounts:
+        labels = account.email.rsplit("@", 1)[-1].lower().split(".")
+        second_level = len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in ("co", "com", "org", "net", "ac")
+        label = labels[-3] if second_level else labels[-2] if len(labels) >= 2 else labels[0]  # "mail.acme.co.in"
+        name = label.capitalize()
+        if label.isalpha() and label not in _PROVIDERS and name not in names:
+            names.append(name)
+    return names
+
+
 def sourced(store: Store, config: Config, extra: list[str] | tuple[str, ...] = ()) -> list[tuple[str, str]]:
     """Every word ``words`` gives, in the same order, each with where it came from.
 
     The source is "person" (the people of this meeting, and of each engagement, in full and by first name),
-    "engagement", "dossier" (a term from an engagement's dossier), "taught" (a word the user taught Jarvis) or
-    "common" (a term of the trade). A word that comes from two places is listed once, under the first.
+    "organisation" (the user's own, by the name of their mail domain), "engagement", "dossier" (a term from an
+    engagement's dossier), "taught" (a word the user taught Jarvis) or "common" (a term of the trade). A word that
+    comes from two places is listed once, under the first.
     """
     found: list[tuple[str, str]] = [(word, "person") for word in extra]
+    found.extend((name, "organisation") for name in organisations(config))
     for project in projects.load(store, config):
         found.append((project.name, "engagement"))
         for person in project.people:

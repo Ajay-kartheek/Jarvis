@@ -17,6 +17,7 @@ const WORD_MIN = 2;
 const NAME_MAX = 60; // a word, and each side of a name
 
 const SOURCES: { source: WordSource; label: string }[] = [
+  { source: "organisation", label: "Your organisation" },
   { source: "engagement", label: "Engagements" },
   { source: "person", label: "People" },
   { source: "dossier", label: "Dossier terms" },

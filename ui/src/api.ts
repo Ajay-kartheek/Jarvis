@@ -268,7 +268,7 @@ export interface Dossier {
 }
 
 /** Where Jarvis found a word it listens for by itself. */
-export type WordSource = "engagement" | "person" | "dossier" | "common";
+export type WordSource = "organisation" | "engagement" | "person" | "dossier" | "common";
 
 /** A word the speech recogniser leans towards that Jarvis found by itself, and where it found it. */
 export interface HeardWord {
