@@ -469,6 +469,15 @@ def test_someone_else_called_does_not_wake_the_ear(world):
     assert world.told() == [ASLEEP, OFF]
 
 
+def test_a_start_that_was_nearly_a_call_is_logged_and_other_talk_is_not(world, caplog):
+    with caplog.at_level(logging.INFO, logger="jarvis"):
+        world.play(quiet(1), words("Jarvis is still syncing the mail"), quiet(2), words("the taxi is here"), quiet(2))
+    assert world.messages == []
+    assert "'Jarvis is still syncing" in caplog.text and "taxi" not in caplog.text
+    assert ear._near_call("Travis, what time is it") and ear._near_call("hey Javis")
+    assert not ear._near_call("Java is installed on the server") and not ear._near_call("the taxi is here")
+
+
 def test_the_name_right_after_other_talk_without_a_pause_is_not_the_start_of_an_utterance(world):
     world.play(quiet(1), words("so I told them we would ship on Friday"), quiet(0.15),
                words("Jarvis, what time is it?"), quiet(2))
@@ -677,11 +686,20 @@ def test_only_a_noise_after_the_name_and_the_ear_gives_up(world):
     assert world.told() == [ASLEEP, AWAKE, LISTENING, CANCELLED, ASLEEP, OFF]
 
 
-def test_no_message_is_longer_than_the_limit(world):
-    world.play(quiet(1), call(), words(" ".join(["again"] * 160)), quiet(2), frame=ear.FRAME)  # forty seconds
+def test_no_message_is_longer_than_the_limit(world, caplog):
+    said = int((ear.MAX_SECONDS + 10) / WORD)  # ten seconds more than the limit
+    with caplog.at_level(logging.INFO, logger="jarvis"):
+        world.play(quiet(1), call(), words(" ".join(["again"] * said)), quiet(2), frame=ear.FRAME)
     took = world.when("voice", "heard")[0] - world.when("voice", "listening")[0]
     assert ear.MAX_SECONDS <= took <= ear.MAX_SECONDS + 0.2
-    assert len(world.messages) == 1 and 110 <= len(world.messages[0].split()) <= 121
+    most = ear.MAX_SECONDS / WORD
+    assert len(world.messages) == 1 and most - 10 <= len(world.messages[0].split()) <= most + 1
+    assert "the longest message" in caplog.text
+
+
+def test_a_message_of_a_minute_is_taken_whole(world):
+    world.play(quiet(1), call(), words(" ".join(["again"] * 240) + " and that is all."), quiet(2), frame=ear.FRAME)
+    assert world.messages[0].endswith("and that is all.")
 
 
 def test_after_a_message_is_given_up_the_name_wakes_the_ear_again(world):
@@ -911,10 +929,19 @@ def test_a_cough_in_the_follow_up_time_is_let_go_and_the_user_can_still_answer(w
     world.play(quiet(1), call(), words("what time is it?"), quiet(1.5), *answered(world),
                quiet(1), cough, quiet(2), words("and tomorrow?"), quiet(2))
     assert world.messages == ["What time is it?", "And tomorrow?"]
-    assert without_partials(world.told()) == [
-        ASLEEP, AWAKE, LISTENING, *heard("What time is it?"),
-        LISTENING, CANCELLED, LISTENING, *heard("And tomorrow?"), OFF,
+    assert without_partials(world.told()) == [  # the cough is never shown as the user beginning to speak
+        ASLEEP, AWAKE, LISTENING, *heard("What time is it?"), LISTENING, *heard("And tomorrow?"), OFF,
     ]
+    assert world.listening == 2
+
+
+def test_a_follow_up_is_shown_as_its_first_word_is_made_out(world):
+    world.play(quiet(1), call(), words("what time is it?"), quiet(1.5), *answered(world), quiet(2),
+               words("and tomorrow?"), quiet(2), frame=ear.FRAME)
+    began = 1 + 0.5 + 1 + 1.5 + 1 + 2 + 2
+    shown = world.when("voice", "listening")[1]
+    assert 0 < shown - began <= WORD + 2 * ear.FRAME / RATE
+    assert all(at >= shown for at in world.when("voice", "partial") if at > began)  # never words before it
 
 
 def test_jarvis_speaking_up_by_himself_can_be_answered_without_the_name(world):
@@ -949,12 +976,16 @@ def test_the_user_going_on_right_after_a_message_ended_is_the_rest_of_it(world):
     assert world.by_name == [True, False]
 
 
-def test_the_rest_of_a_message_that_comes_to_nothing_is_handed_on_empty_so_the_message_stands(world):
+def test_a_cough_right_after_a_message_is_not_its_rest_and_the_answer_is_still_waited_for(world):
     cough = np.full(int(0.3 * RATE), COUGH, dtype=np.float32)  # a voice to the voice model, no words to the recogniser
     world.finished = FakeFinished()
-    world.play(quiet(1), call(), words("what time is it?"), quiet(1.0), cough, quiet(3), frame=ear.FRAME)
-    assert world.messages == ["What time is it?", ""] and world.continued == [False, True]
-    assert ("voice", "heard", "") not in world.told()
+    world.play(quiet(1), call(), words("what time is it?"), quiet(1.0), cough, quiet(0.5), *answered(world),
+               quiet(1), words("and tomorrow?"), quiet(2), frame=ear.FRAME)
+    assert world.messages == ["What time is it?", "And tomorrow?"] and world.continued == [False, False]
+    assert world.listening == 2 and world.continuing == [False, False]  # nothing was taken back for it
+    assert without_partials(world.told()) == [
+        ASLEEP, AWAKE, LISTENING, *heard("What time is it?"), LISTENING, *heard("And tomorrow?"), OFF,
+    ]
 
 
 def test_after_two_seconds_talk_without_the_name_is_not_taken_while_the_answer_is_waited_for(world):

@@ -147,6 +147,13 @@ final class Speaker {
   private let levelLock = NSLock()
   private var latestLevel: Float = 0
   private var levelTimer: DispatchSourceTimer?
+  // The engine has rendered since it last started (audio thread, under levelLock). Playing before it
+  // has, or once it has stopped by itself because the sound devices changed, throws ("player did not see
+  // an IO cycle") and takes the whole app down; so a sentence waits for it, and starts it again if need be.
+  private var rendered = false
+  private var unreadySince: DispatchTime?  // a sentence has been waiting for that since then
+  private var outputRestarts = 0  // ...and the engine was started again this often for it
+  static let unreadyWaitSeconds = 1.0
 
   // Test copy only: a sound file mixed into the echo-cancelled microphone, this long after a speech
   // starts playing (JARVIS_TEST_MIX=<16 kHz mono WAV>@<seconds>), to stand in for the user talking
@@ -370,6 +377,31 @@ final class Speaker {
         outputUntil = Date()
         continue
       }
+      if !outputReady() {
+        let since = unreadySince ?? .now()
+        unreadySince = since
+        let waited = Double(DispatchTime.now().uptimeNanoseconds &- since.uptimeNanoseconds) / 1e9
+        if waited < Speaker.unreadyWaitSeconds {
+          queue.asyncAfter(deadline: .now() + 0.02) { [weak self] in self?.pump() }
+          return
+        }
+        unreadySince = nil
+        guard outputRestarts < 2 else {
+          Log.write("speaker: the sound output does not run; sentence \(now.next) of \(now.id) passed over")
+          outputRestarts = 0
+          now.clips[now.next] = nil
+          now.next += 1
+          continue
+        }
+        outputRestarts += 1
+        Log.write("speaker: the sound output is not running; starting it again")
+        let current = mode
+        mode = .off
+        restart(current)  // which plays on once it is back
+        return
+      }
+      unreadySince = nil
+      outputRestarts = 0
       linger?.cancel()
       linger = nil
       if !now.started, let ready = now.firstReady {
@@ -570,12 +602,21 @@ final class Speaker {
     engine.prepare()
     self.engine = engine
     self.player = player
+    levelLock.lock()
+    rendered = false
+    levelLock.unlock()
     try engine.start()
     mode = wanted
     observer = NotificationCenter.default.addObserver(
       forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
     ) { [weak self] _ in
-      // Another output or input device: set up again once it has settled.
+      // Another output or input device: set up again once it has settled. The engine has stopped: no
+      // sentence is played on it meanwhile.
+      if let self {
+        self.levelLock.lock()
+        self.rendered = false
+        self.levelLock.unlock()
+      }
       self?.queue.asyncAfter(deadline: .now() + 0.5) {
         guard let self, self.engine === engine else { return }
         Log.write("speaker: the sound devices changed; starting the engine again")
@@ -648,6 +689,9 @@ final class Speaker {
   // MARK: Levels and telling others
 
   private func measure(_ buffer: AVAudioPCMBuffer) {
+    levelLock.lock()
+    rendered = true  // the engine renders: a player on it may play
+    levelLock.unlock()
     guard let channels = buffer.floatChannelData, buffer.frameLength > 0 else { return }
     var sum: Float = 0
     let count = Int(buffer.frameLength)
@@ -655,6 +699,14 @@ final class Speaker {
     levelLock.lock()
     latestLevel = (sum / Float(count)).squareRoot()
     levelLock.unlock()
+  }
+
+  /// Whether a sentence may be played now: the engine runs, and has rendered since it started.
+  private func outputReady() -> Bool {
+    guard let engine, engine.isRunning else { return false }
+    levelLock.lock()
+    defer { levelLock.unlock() }
+    return rendered
   }
 
   private func startLevels() {

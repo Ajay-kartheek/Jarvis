@@ -50,6 +50,14 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def no_shared_applications(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never put anything in, or take anything out of, the real /Applications."""
+    from jarvis import install
+
+    monkeypatch.setattr(install, "SHARED_APPS", tmp_path / "no-applications")
+
+
+@pytest.fixture(autouse=True)
 def no_cloud_voice(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tests never read the user's real ElevenLabs key, so no test speaks through the network by accident."""
     from jarvis import eleven

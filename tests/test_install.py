@@ -28,6 +28,21 @@ def _quit(running: set[int], steps: list[str]):
     return kill
 
 
+def test_the_app_goes_where_finder_shows_it_when_it_may_and_an_earlier_copy_is_taken_away(fake_home, monkeypatch, tmp_path):
+    shared = tmp_path / "system" / "Applications"  # the home folder is tmp_path itself
+    monkeypatch.setattr(install, "SHARED_APPS", shared)
+    earlier = fake_home / "Applications" / "Jarvis.app" / "Contents"
+    earlier.mkdir(parents=True)
+    (earlier / "Info.plist").write_bytes(install.plistlib.dumps({"CFBundleIdentifier": install.LABEL}))
+    assert install.installed_app() == fake_home / "Applications" / "Jarvis.app"  # no /Applications to write to
+    assert install._earlier_copies() == []
+    shared.mkdir(parents=True)
+    assert install.installed_app() == shared / "Jarvis.app"
+    assert install._earlier_copies() == [fake_home / "Applications" / "Jarvis.app"]
+    (earlier / "Info.plist").write_bytes(install.plistlib.dumps({"CFBundleIdentifier": "com.example.other"}))
+    assert install._earlier_copies() == []  # an app of the same name that is not Jarvis is left alone
+
+
 def test_stop_quits_a_copy_opened_by_hand_after_a_quit(monkeypatch):
     running, steps, said = {4242}, [], []
     monkeypatch.setattr(install, "_run", _launchd(False, running, steps))

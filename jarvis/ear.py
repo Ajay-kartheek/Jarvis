@@ -21,8 +21,10 @@ the user go on all the same within two seconds, before Jarvis has begun to answe
 message, and the service answers the two as one.
 
 After Jarvis's answer has been heard the ear stays awake a few seconds, so that a follow-up needs no name, unless the
-conversation was ended (the user said that was all, or a follow-up turned out not to be meant for him). A line of his
-own while he works ("One moment.") is not his answer, and opens no such time. While Jarvis himself is speaking only
+conversation was ended (the user said that was all, or a follow-up turned out not to be meant for him). Such a
+follow-up is shown, and the service told of it, only once a word of it has been made out: a cough or a chair is never
+taken for the user beginning to speak. A line of his own while he works ("One moment.") is not his answer, and opens
+no such time. While Jarvis himself is speaking only
 the name counts, which is how he is interrupted; his own voice, which the microphone hears as well, is never taken for
 a message. Through the speakers that means the name is heard when it follows a pause in what the microphone hears,
 between his sentences say; through headphones, at any time, and right after a message the user can go on over him.
@@ -44,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import difflib
 import functools
 import hashlib
 import importlib.util
@@ -126,7 +129,7 @@ CONTINUE_SECONDS = 2.0  # a voice this soon after a message ended, before Jarvis
 #   it: the ear took a pause for its end. The service puts the two together and answers them as one.
 END_SECONDS = 0.9  # without the turn model, the user stopped: this long without a voice, once there are words
 GIVE_UP_SECONDS = 4.0  # nobody spoke after the name
-MAX_SECONDS = 30.0  # no message is longer than this
+MAX_SECONDS = 90.0  # no message is longer than this. At 30 the user was cut off explaining a problem (66 words).
 FOLLOW_UP_SECONDS = 8.0  # after Jarvis has answered, speech without the name is a message
 ECHO_SECONDS = 0.3  # ...but not at once: his last word is still on its way here, and then in the room
 REPLY_SECONDS = 20.0  # how long to stay awake for an answer that has not begun to be spoken
@@ -476,6 +479,13 @@ def _leaning_call(plain: str, leaning: str | None, ended: bool) -> int | None:
     return end if alone and len(_WORDS.findall(leaning)) <= CALL_ALONE_WORDS else None
 
 
+def _near_call(text: str) -> bool:
+    """Whether ``text``, the start of an utterance that was not taken for a call, has a word like the name among its
+    first few ("Travis, what time ...", "Jarvis is ..."): a call the ear may have missed, worth a line in the log."""
+    first = re.findall(r"[a-z]+", text.lower())[:4]
+    return any(len(word) >= 4 and difflib.SequenceMatcher(None, word, "jarvis").ratio() > 0.6 for word in first)
+
+
 def _said(text: str) -> str:
     """What the user said to Jarvis: ``text`` without the name, should it be there, said again or still."""
     while found := _CALL.match(text):
@@ -617,6 +627,7 @@ class _Spotter:
         self.gain = 1.0  # how much louder it was made for the recogniser
         self.decodes = 0
         self.seconds = 0.0  # spent recognising
+        self.seen = ""  # its last reading, once it is let go
         self._handed = False
 
     def ready(self) -> None:
@@ -670,6 +681,8 @@ class _Spotter:
             return
         self.next = upcoming
         self.over = last or (len(_WORDS.findall(text)) >= SURE_WORDS and not _MAY_CALL.match(text))
+        if self.over:
+            self.seen = text.strip()
 
     def message(self) -> np.ndarray:
         """The sound after the name. The recogniser goes with it to the message."""
@@ -721,6 +734,7 @@ class _Message:
         self.named = False  # ...or its words began with the name all the same, as a follow-up's may out of habit
         self.over_him = over_him  # it began while Jarvis was speaking: his words may come back in it
         self.continues = continues  # it began right after the message before ended: the rest of that one
+        self.announced = False  # the page and the service were told that it is being taken
         self.vocabulary = words  # the user's names and terms
         self.loading = loading  # the recogniser, when it has come
         self.loading.add_done_callback(_looked_at)
@@ -833,7 +847,8 @@ class Ear:
     ``by_name`` says, while it is called, whether that message began with Jarvis's name (a follow-up, or talk over him,
     may not have been meant for him), and ``continues`` whether it is the rest of the message before, which the ear took
     for finished too soon (its words may then be empty: the rest came to nothing, and the one before stands as it was);
-    ``on_listening``, if given, is told when a message begins to be taken (``continues`` is set by then), and
+    ``on_listening``, if given, is told when a message begins to be taken (by the name or over his voice at once,
+    otherwise once its first word is made out; ``continues`` is set by then), and
     ``vocabulary``, if given, gives the user's names and terms that messages are read leaning towards. All are called
     on the event loop, and so must the methods be.
     """
@@ -1140,6 +1155,8 @@ class Ear:
                        quiet=spotter.quiet, his=spotter.his, gain=spotter.gain)
             return True
         elif spotter.over:
+            if _near_call(spotter.seen):  # a call the ear may have missed: the start of what was said, to tune it
+                log.info("ear: %r was nearly a call, and not taken for one", spotter.seen[:80])
             self._drop_spotter()
         return False
 
@@ -1155,6 +1172,10 @@ class Ear:
         saying until then, and the words said over it, are not the user's message. (With headphones, or his voice
         cancelled out of the microphone, they are: there is nothing of his in the sound.) ``continues``: it is the
         rest of the message before, which the service is told as it begins (``continues`` is set by then).
+
+        Called by the name, or over his voice, the message is shown and he stops at once (see :meth:`_announce`); a
+        follow-up, or the rest of a message, only once a word of it has been made out, so that a cough, a laugh or
+        a chair is never taken for the user beginning to speak.
         """
         self.continues = continues
         over_him = over_him or self._speaking or his
@@ -1166,14 +1187,21 @@ class Ear:
             kept = min(int(ONSET_PREROLL_SECONDS * SAMPLE_RATE), clean, len(self._ring))
             before = self._ring[len(self._ring) - kept:]
         self._enter(LISTENING)
-        self._publish({"type": "voice", "phase": "listening"})
-        if self._on_listening is not None:
-            self._on_listening()
-        self._message = _Message(
+        self._message = message = _Message(
             before, loading if loading is not None else self._work(_recogniser), called=called,
             interrupting=interrupting, spoke=spoke if called else None, quiet=quiet, gain=gain, words=self._words(),
             over_him=over_him and not interrupting, finished=self._finished, continues=continues,
         )
+        if called or over_him:
+            self._announce(message)
+
+    def _announce(self, message: _Message) -> None:
+        """Say that ``message`` is being taken: the page shows it (and stops his voice), and the service stops him
+        and gets ready to answer."""
+        message.announced = True
+        self._publish({"type": "voice", "phase": "listening"})
+        if self._on_listening is not None:
+            self._on_listening()
 
     def _his_own(self, text: str) -> bool:
         """Whether ``text`` is mostly what Jarvis said lately."""
@@ -1190,8 +1218,11 @@ class Ear:
 
     async def _follow(self, message: _Message, frame: np.ndarray) -> None:
         """Show how the message is coming along, and end it when the user has stopped."""
-        loudness = float(np.sqrt(np.mean(np.square(frame, dtype=np.float64))))
-        self._publish({"type": "level", "source": "voice", "level": round(min(1.0, loudness * 12), 3)})
+        if message.words and not message.announced:
+            self._announce(message)  # its first word: the user has begun to speak
+        if message.announced:
+            loudness = float(np.sqrt(np.mean(np.square(frame, dtype=np.float64))))
+            self._publish({"type": "level", "source": "voice", "level": round(min(1.0, loudness * 12), 3)})
         if message.words != message.shown:
             message.shown = message.words
             self._publish({"type": "voice", "phase": "partial", "text": message.words})
@@ -1214,7 +1245,10 @@ class Ear:
             final = ""
         if message.failed is not None:  # say why nothing came of it instead of leaving the orb listening
             self._publish({"type": "info", "text": f"Jarvis could not hear that: {message.failed}"})
-        if final or message.continues:  # the rest of a message that came to nothing still hands that one on again
+        if final and not message.announced:
+            self._announce(message)  # its words were made out only at its end
+        # The rest of a message that came to nothing is handed on all the same: the service took that one back.
+        if final or (message.continues and message.announced):
             self._ended(message)
             self._publish({"type": "voice", "phase": "heard", "text": final} if final else
                           {"type": "voice", "phase": "cancelled"})
@@ -1226,15 +1260,21 @@ class Ear:
             self.continues = message.continues
             self._on_message(final)
         else:
-            self._publish({"type": "voice", "phase": "cancelled"})
+            if message.announced:
+                self._publish({"type": "voice", "phase": "cancelled"})
             again = not message.called and message.failed is None and self._heard < self._until
             self._onset = _Onset(after_quiet=True)
-            self._enter(FOLLOW_UP if again else ASLEEP)  # a cough in the follow-up time does not end it
+            if message.continues and not message.over_him:
+                self._enter(REPLYING)  # a sound after a message: its answer is still waited for
+            else:
+                self._enter(FOLLOW_UP if again else ASLEEP)  # a cough in the follow-up time does not end it
 
     def _ended(self, message: _Message) -> None:
         """A line in the log on why a message was taken to be over, to tune that against the user's own voice. One that
         began soon after the one before ended may be the rest of it, cut off."""
-        if message.finished is None:
+        if message.samples >= MAX_SECONDS * SAMPLE_RATE:
+            why = f"the longest message, {MAX_SECONDS:.0f} s"
+        elif message.finished is None:
             why = "a fixed pause"
         elif message.complete:
             why = f"finished, {message.chance:.2f}"
@@ -1290,8 +1330,9 @@ class Ear:
         """Abandon the message being taken, if there is one."""
         if self._message is not None:
             self._message.close()
+            if self._message.announced:
+                self._publish({"type": "voice", "phase": "cancelled"})
             self._message = None
-            self._publish({"type": "voice", "phase": "cancelled"})
 
     def _drop_spotter(self) -> None:
         """Stop looking at the utterance being looked at, if there is one."""

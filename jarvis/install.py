@@ -1,8 +1,9 @@
 """Set Jarvis up to run by itself.
 
-``jarvis install`` copies the Jarvis app to ~/Applications, tells it how to
-start the background service, and registers it with launchd so it starts at
-login and comes back if it crashes. ``jarvis uninstall`` undoes all of that
+``jarvis install`` copies the Jarvis app to /Applications (to ~/Applications
+when the user may not write there), tells it how to start the background
+service, and registers it with launchd so it starts at login and comes back if
+it crashes. ``jarvis uninstall`` undoes all of that
 and leaves the data alone.
 
 The app is copied out of the project folder because launchd cannot start a
@@ -58,8 +59,29 @@ class InstallError(RuntimeError):
     """Set-up could not finish. The message is safe to show the user."""
 
 
+SHARED_APPS = Path("/Applications")  # where Finder and Launchpad show apps
+
+
 def installed_app() -> Path:
+    """Where the app is put: in /Applications, where the user looks for it, if they may write there (an
+    administrator may); else in the Applications folder of the home folder, which Finder does not show."""
+    if os.access(SHARED_APPS, os.W_OK):
+        return SHARED_APPS / "Jarvis.app"
     return Path.home() / "Applications" / "Jarvis.app"
+
+
+def _earlier_copies() -> list[Path]:
+    """The app where an earlier set-up put it, if that is not where it goes now."""
+    places = (SHARED_APPS / "Jarvis.app", Path.home() / "Applications" / "Jarvis.app")
+    return [place for place in places if place != installed_app() and _is_ours(place)]
+
+
+def _is_ours(app: Path) -> bool:
+    try:
+        with open(app / "Contents" / "Info.plist", "rb") as handle:
+            return plistlib.load(handle).get("CFBundleIdentifier") == LABEL
+    except (OSError, plistlib.InvalidFileException):
+        return False
 
 
 def agent_file() -> Path:
@@ -144,11 +166,15 @@ def _launchd_pid() -> int | None:
 
 def _opened_by_hand() -> list[int]:
     """Copies of the installed app that launchd did not start: opened from Finder after a Quit, say. launchd cannot
-    stop them, and one left running keeps the old version going and turns the new one away (the app's lock)."""
-    program = str(installed_app() / "Contents" / "MacOS" / "Jarvis")
-    found = _run(["pgrep", "-x", "-f", program], check=False)  # exactly the app: not its capture helper
+    stop them, and one left running keeps the old version going and turns the new one away (the app's lock). A copy
+    where an earlier set-up put the app counts too."""
     launchds = _launchd_pid()
-    return [int(pid) for pid in found.stdout.split() if pid.isdigit() and int(pid) != launchds]
+    running = []
+    for app in (installed_app(), *_earlier_copies()):
+        program = str(app / "Contents" / "MacOS" / "Jarvis")
+        found = _run(["pgrep", "-x", "-f", program], check=False)  # exactly the app: not its capture helper
+        running += [int(pid) for pid in found.stdout.split() if pid.isdigit() and int(pid) != launchds]
+    return running
 
 
 def _stop_opened_by_hand(progress: Progress) -> None:
@@ -248,6 +274,9 @@ def install(port: int = DEFAULT_PORT, *, rebuild: bool = False, progress: Progre
     deploy(progress)
 
     stop(progress)
+    for earlier in _earlier_copies():  # one app only, where the user looks for it
+        shutil.rmtree(earlier)
+        progress(f"Took away the copy an earlier set-up put in {earlier.parent}")
     target = installed_app()
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
@@ -279,7 +308,7 @@ def uninstall(progress: Progress = print) -> None:
     stop(progress)
     agent_file().unlink(missing_ok=True)
     app_config_file().unlink(missing_ok=True)
-    for folder in (installed_app(), release_dir()):
+    for folder in (installed_app(), *_earlier_copies(), release_dir()):
         if folder.exists():
             shutil.rmtree(folder)
     progress("Removed the app and its login entry. Your data and settings are untouched.")
